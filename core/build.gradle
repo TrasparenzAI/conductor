@@ -53,6 +53,13 @@ dependencies {
     implementation "jakarta.xml.bind:jakarta.xml.bind-api:${revJAXB}"
     implementation "jakarta.activation:jakarta.activation-api:${revActivation}"
 
+    implementation "org.springframework.boot:spring-boot-starter-oauth2-client"
+    implementation "org.springframework.boot:spring-boot-starter-oauth2-resource-server"
+    implementation 'org.springframework.boot:spring-boot-starter-webflux'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+
+
+
     // Only add it as a test dependency. The actual jaxb runtime provider is provided when building the server.
     testImplementation "org.glassfish.jaxb:jaxb-runtime:${revJAXB}"
 

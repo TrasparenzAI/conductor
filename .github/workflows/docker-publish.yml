@@ -1,0 +1,24 @@
+name: Publish Conductor OSS Docker image to ghcr.io
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-publish-dev:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2 # Checking out the repo
+
+      - name: Build and Publish head Docker image
+        uses: VaultVulp/gp-docker-action@1.1.12
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }} # Provide GITHUB_TOKEN to login into the GitHub Packages
+          image-name: conductor # Provide Docker image name
+          image-tag: anac
+          build-context: ./docker/server # Provide path to the folder with the Dockerfile

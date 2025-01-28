@@ -95,6 +95,9 @@ public @interface WorkflowTaskTypeConstraint {
                 case TaskType.TASK_TYPE_HTTP:
                     valid = isHttpTaskValid(workflowTask, context);
                     break;
+                case TaskType.TASK_TYPE_HTTP_WEBCLIENT:
+                    valid = isHttpTaskValid(workflowTask, context);
+                    break;
                 case TaskType.TASK_TYPE_FORK_JOIN:
                     valid = isForkJoinTaskValid(workflowTask, context);
                     break;
