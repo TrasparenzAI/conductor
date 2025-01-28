@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Build and Push Container to ghcr.io
+      - name: Build and Push Container to ghcr
         uses: GlueOps/github-actions-build-push-containers@v0.3.7
         with:
           context: ./docker/server
