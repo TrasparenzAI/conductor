@@ -16,6 +16,6 @@ jobs:
       - name: Build and Push Container to ghcr.io
         uses: GlueOps/github-actions-build-push-containers@v0.3.7
         with:
-          context: ./docker/server
+          dockerfile: ./docker/server/Dockerfile
           tags: anac
 
