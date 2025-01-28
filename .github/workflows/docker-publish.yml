@@ -19,6 +19,6 @@ jobs:
         uses: VaultVulp/gp-docker-action@1.1.12
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }} # Provide GITHUB_TOKEN to login into the GitHub Packages
-          image-name: conductor # Provide Docker image name
+          image-name: conductor
           image-tag: anac
           build-context: ./docker/server # Provide path to the folder with the Dockerfile
