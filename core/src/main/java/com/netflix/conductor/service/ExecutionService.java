@@ -419,16 +419,19 @@ public class ExecutionService {
 
     public void removeWorkflow(String workflowId, boolean archiveWorkflow) {
         executionDAOFacade.removeWorkflow(workflowId, archiveWorkflow);
-        CompletableFuture.runAsync(() -> {
-            executionDAOFacade.getWorkflowChildIds(workflowId)
-                    .forEach(workflowChildId -> {
-                        try {
-                            removeWorkflow(workflowChildId, archiveWorkflow);
-                        } catch (NotFoundException _ex) {
-                            LOGGER.warn(_ex.getMessage());
-                        }
-                    });
-        });
+        CompletableFuture.runAsync(
+                () -> {
+                    executionDAOFacade
+                            .getWorkflowChildIds(workflowId)
+                            .forEach(
+                                    workflowChildId -> {
+                                        try {
+                                            removeWorkflow(workflowChildId, archiveWorkflow);
+                                        } catch (NotFoundException _ex) {
+                                            LOGGER.warn(_ex.getMessage());
+                                        }
+                                    });
+                });
     }
 
     public SearchResult<WorkflowSummary> search(

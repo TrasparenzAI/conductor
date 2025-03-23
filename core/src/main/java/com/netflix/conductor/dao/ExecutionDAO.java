@@ -215,7 +215,6 @@ public interface ExecutionDAO {
      */
     void removeEventExecution(EventExecution eventExecution);
 
-
     /**
      * @param workflowId id of the workflow
      * @return List of workflow ids which are child
@@ -223,5 +222,4 @@ public interface ExecutionDAO {
     default List<String> getWorkflowChildIds(String workflowId) {
         return Collections.emptyList();
     }
-
 }
