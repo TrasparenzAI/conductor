@@ -258,7 +258,18 @@ public class PostgresExecutionDAO extends PostgresBaseDAO
     public TaskModel getTask(String taskId) {
         String GET_TASK = "SELECT json_data FROM task WHERE task_id = ?";
         return queryWithTransaction(
-                GET_TASK, q -> q.addParameter(taskId).executeAndFetchFirst(TaskModel.class));
+                    GET_TASK, q -> q.addParameter(taskId).executeAndFetchFirst(TaskModel.class));
+    }
+
+    @Override
+    public List<String> getWorkflowChildIds(String workflowId) {
+        Preconditions.checkNotNull(workflowId, "workflowId cannot be null");
+        String GET_CHILD_WORKFLOW_IDS =
+                "SELECT workflow_id FROM workflow WHERE json_data like CONCAT('%', ?, '%')";
+
+        return queryWithTransaction(
+                GET_CHILD_WORKFLOW_IDS,
+                q -> q.addParameter(workflowId).executeScalarList(String.class));
     }
 
     @Override

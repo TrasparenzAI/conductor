@@ -13,6 +13,7 @@
 package com.netflix.conductor.service;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -418,6 +419,16 @@ public class ExecutionService {
 
     public void removeWorkflow(String workflowId, boolean archiveWorkflow) {
         executionDAOFacade.removeWorkflow(workflowId, archiveWorkflow);
+        CompletableFuture.runAsync(() -> {
+            executionDAOFacade.getWorkflowChildIds(workflowId)
+                    .forEach(workflowChildId -> {
+                        try {
+                            removeWorkflow(workflowChildId, archiveWorkflow);
+                        } catch (NotFoundException _ex) {
+                            LOGGER.warn(_ex.getMessage());
+                        }
+                    });
+        });
     }
 
     public SearchResult<WorkflowSummary> search(

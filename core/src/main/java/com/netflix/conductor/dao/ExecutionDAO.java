@@ -12,6 +12,7 @@
  */
 package com.netflix.conductor.dao;
 
+import java.util.Collections;
 import java.util.List;
 
 import com.netflix.conductor.common.metadata.events.EventExecution;
@@ -213,4 +214,14 @@ public interface ExecutionDAO {
      * @param eventExecution Event execution to be removed
      */
     void removeEventExecution(EventExecution eventExecution);
+
+
+    /**
+     * @param workflowId id of the workflow
+     * @return List of workflow ids which are child
+     */
+    default List<String> getWorkflowChildIds(String workflowId) {
+        return Collections.emptyList();
+    }
+
 }

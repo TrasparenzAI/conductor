@@ -695,6 +695,9 @@ public class ExecutionDAOFacade {
                 : Collections.emptyList();
     }
 
+    public List<String> getWorkflowChildIds(String workflowId) {
+        return executionDAO.getWorkflowChildIds(workflowId);
+    }
     /**
      * Populates the workflow input data and the tasks input/output data if stored in external
      * payload storage.
