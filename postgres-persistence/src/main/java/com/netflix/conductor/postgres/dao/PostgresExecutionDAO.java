@@ -262,14 +262,17 @@ public class PostgresExecutionDAO extends PostgresBaseDAO
     }
 
     @Override
-    public List<String> getWorkflowChildIds(String workflowId) {
+    public List<String> getWorkflowChildIds(String workflowId, String correlationId) {
         Preconditions.checkNotNull(workflowId, "workflowId cannot be null");
         String GET_CHILD_WORKFLOW_IDS =
-                "SELECT workflow_id FROM workflow WHERE json_data like CONCAT('%', ?, '%')";
+                "SELECT workflow_id FROM workflow WHERE correlationId = ? and json_data like CONCAT('%', ?, '%')";
 
         return queryWithTransaction(
                 GET_CHILD_WORKFLOW_IDS,
-                q -> q.addParameter(workflowId).executeScalarList(String.class));
+                q ->
+                        q.addParameter(correlationId)
+                                .addParameter(workflowId)
+                                .executeScalarList(String.class));
     }
 
     @Override

@@ -153,7 +153,7 @@ public class ExecutionDAOFacade {
         return getWorkflowModelFromDataStore(workflowId, includeTasks).toWorkflow();
     }
 
-    private WorkflowModel getWorkflowModelFromDataStore(String workflowId, boolean includeTasks) {
+    public WorkflowModel getWorkflowModelFromDataStore(String workflowId, boolean includeTasks) {
         WorkflowModel workflow = executionDAO.getWorkflow(workflowId, includeTasks);
         if (workflow == null) {
             LOGGER.debug("Workflow {} not found in executionDAO, checking indexDAO", workflowId);
@@ -695,8 +695,8 @@ public class ExecutionDAOFacade {
                 : Collections.emptyList();
     }
 
-    public List<String> getWorkflowChildIds(String workflowId) {
-        return executionDAO.getWorkflowChildIds(workflowId);
+    public List<String> getWorkflowChildIds(String workflowId, String correlationId) {
+        return executionDAO.getWorkflowChildIds(workflowId, correlationId);
     }
 
     /**

@@ -42,6 +42,7 @@ import com.netflix.conductor.core.utils.Utils;
 import com.netflix.conductor.dao.QueueDAO;
 import com.netflix.conductor.metrics.Monitors;
 import com.netflix.conductor.model.TaskModel;
+import com.netflix.conductor.model.WorkflowModel;
 
 @Trace
 @Service
@@ -421,8 +422,10 @@ public class ExecutionService {
         executionDAOFacade.removeWorkflow(workflowId, archiveWorkflow);
         CompletableFuture.runAsync(
                 () -> {
+                    WorkflowModel workflow =
+                            executionDAOFacade.getWorkflowModelFromDataStore(workflowId, true);
                     executionDAOFacade
-                            .getWorkflowChildIds(workflowId)
+                            .getWorkflowChildIds(workflowId, workflow.getCorrelationId())
                             .forEach(
                                     workflowChildId -> {
                                         try {
