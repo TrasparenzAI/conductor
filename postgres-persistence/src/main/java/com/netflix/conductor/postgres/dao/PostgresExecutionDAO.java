@@ -258,7 +258,7 @@ public class PostgresExecutionDAO extends PostgresBaseDAO
     public TaskModel getTask(String taskId) {
         String GET_TASK = "SELECT json_data FROM task WHERE task_id = ?";
         return queryWithTransaction(
-                    GET_TASK, q -> q.addParameter(taskId).executeAndFetchFirst(TaskModel.class));
+                GET_TASK, q -> q.addParameter(taskId).executeAndFetchFirst(TaskModel.class));
     }
 
     @Override
