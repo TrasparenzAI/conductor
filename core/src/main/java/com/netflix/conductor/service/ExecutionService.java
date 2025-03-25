@@ -419,11 +419,10 @@ public class ExecutionService {
     }
 
     public void removeWorkflow(String workflowId, boolean archiveWorkflow) {
+        WorkflowModel workflow = executionDAOFacade.getWorkflowModelFromDataStore(workflowId, true);
         executionDAOFacade.removeWorkflow(workflowId, archiveWorkflow);
         CompletableFuture.runAsync(
                 () -> {
-                    WorkflowModel workflow =
-                            executionDAOFacade.getWorkflowModelFromDataStore(workflowId, true);
                     executionDAOFacade
                             .getWorkflowChildIds(workflowId, workflow.getCorrelationId())
                             .forEach(
