@@ -436,6 +436,7 @@ public class ExecutionService {
                                             LOGGER.warn(_ex.getMessage());
                                         }
                                     });
+                    LOGGER.trace("Completed delete all workflow width parent {}", workflowId);
                 });
     }
 
