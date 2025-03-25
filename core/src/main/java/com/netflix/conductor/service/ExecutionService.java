@@ -429,7 +429,9 @@ public class ExecutionService {
                             .forEach(
                                     workflowChildId -> {
                                         try {
-                                            LOGGER.info("Try to delete child workflow {}", workflowChildId);
+                                            LOGGER.info(
+                                                    "Try to delete child workflow {}",
+                                                    workflowChildId);
                                             removeWorkflow(workflowChildId, archiveWorkflow);
                                         } catch (NotFoundException _ex) {
                                             LOGGER.warn(_ex.getMessage());
