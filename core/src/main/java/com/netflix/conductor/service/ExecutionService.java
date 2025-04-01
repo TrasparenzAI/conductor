@@ -428,12 +428,12 @@ public class ExecutionService {
                             .forEach(
                                     workflowChildId -> {
                                         try {
-                                            LOGGER.info(
+                                            LOGGER.trace(
                                                     "Try to delete child workflow {}",
                                                     workflowChildId);
                                             removeWorkflow(workflowChildId, archiveWorkflow);
                                         } catch (NotFoundException _ex) {
-                                            LOGGER.warn(_ex.getMessage());
+                                            LOGGER.trace(_ex.getMessage());
                                         }
                                     });
                     LOGGER.trace("Completed delete all workflow width parent {}", workflowId);
