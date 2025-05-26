@@ -106,11 +106,11 @@ public class HttpWebClientTask extends HttpTask {
                 .onErrorResume(
                         WebClientResponseException.class,
                         e -> {
-                            LOGGER.error(e.getResponseBodyAsString());
+                            LOGGER.error(e.getMessage());
                             HttpResponse resp = new HttpResponse();
                             resp.headers = e.getHeaders();
                             resp.statusCode = e.getStatusCode().value();
-                            resp.body = e.getResponseBodyAsString();
+                            resp.body = e.getMessage();
                             return Mono.just(resp);
                         })
                 .block();
