@@ -265,7 +265,7 @@ public class PostgresExecutionDAO extends PostgresBaseDAO
     public List<String> getWorkflowChildIds(String workflowId, String correlationId) {
         Preconditions.checkNotNull(workflowId, "workflowId cannot be null");
         String GET_CHILD_WORKFLOW_IDS =
-                "SELECT workflow_id FROM workflow WHERE correlation_id = ? and json_data::json ->> 'parentWorkflowId' = '?'";
+                "SELECT workflow_id FROM workflow WHERE correlation_id = ? and json_data::json ->> 'parentWorkflowId' = ?";
 
         return queryWithTransaction(
                 GET_CHILD_WORKFLOW_IDS,
