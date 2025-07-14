@@ -23,11 +23,11 @@ import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
 
-import com.netflix.conductor.common.metadata.tasks.TaskType;
 import org.springframework.retry.support.RetryTemplate;
 
 import com.netflix.conductor.common.metadata.events.EventExecution;
 import com.netflix.conductor.common.metadata.tasks.TaskDef;
+import com.netflix.conductor.common.metadata.tasks.TaskType;
 import com.netflix.conductor.core.exception.NonTransientException;
 import com.netflix.conductor.dao.ConcurrentExecutionLimitDAO;
 import com.netflix.conductor.dao.ExecutionDAO;
@@ -239,19 +239,30 @@ public class PostgresExecutionDAO extends PostgresBaseDAO
         TaskModel task = getTask(taskId);
         if (Optional.ofNullable(task)
                 .map(TaskModel::getTaskType)
-                .filter(s -> s.equalsIgnoreCase(TaskType.TASK_TYPE_START_WORKFLOW) || s.equalsIgnoreCase(TaskType.TASK_TYPE_SUB_WORKFLOW))
+                .filter(
+                        s ->
+                                s.equalsIgnoreCase(TaskType.TASK_TYPE_START_WORKFLOW)
+                                        || s.equalsIgnoreCase(TaskType.TASK_TYPE_SUB_WORKFLOW))
                 .isPresent()) {
             Optional.ofNullable(task.getOutputData())
-                    .map(stringObjectMap -> Optional.ofNullable(stringObjectMap.get("workflowId")).orElseGet(() -> stringObjectMap.get("subWorkflowId")))
+                    .map(
+                            stringObjectMap ->
+                                    Optional.ofNullable(stringObjectMap.get("workflowId"))
+                                            .orElseGet(() -> stringObjectMap.get("subWorkflowId")))
                     .map(String::valueOf)
-                    .ifPresent(workflowId -> {
-                        Optional.ofNullable(getWorkflow(workflowId))
-                                .ifPresent(workflowModel -> {
-                                    getWorkflowChildIds(workflowModel.getWorkflowId(), workflowModel.getCorrelationId())
-                                            .forEach(this::removeWorkflow);
-                                });
-                        removeWorkflow(workflowId);
-                    });
+                    .ifPresent(
+                            workflowId -> {
+                                Optional.ofNullable(getWorkflow(workflowId))
+                                        .ifPresent(
+                                                workflowModel -> {
+                                                    getWorkflowChildIds(
+                                                                    workflowModel.getWorkflowId(),
+                                                                    workflowModel
+                                                                            .getCorrelationId())
+                                                            .forEach(this::removeWorkflow);
+                                                });
+                                removeWorkflow(workflowId);
+                            });
         }
         if (task == null) {
             logger.warn("No such task found by id {}", taskId);
