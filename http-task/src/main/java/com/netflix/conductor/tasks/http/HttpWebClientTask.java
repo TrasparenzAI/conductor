@@ -93,26 +93,37 @@ public class HttpWebClientTask extends HttpTask {
                         s -> {
                             requestBodySpec.accept(MediaType.valueOf(s));
                         });
-        return requestBodySpec
-                .retrieve()
-                .bodyToMono(JsonNode.class)
-                .map(
-                        jsonNode -> {
-                            HttpResponse resp = new HttpResponse();
-                            resp.statusCode = HttpStatus.OK.value();
-                            resp.body = jsonNode;
-                            return resp;
-                        })
-                .onErrorResume(
-                        WebClientResponseException.class,
-                        e -> {
-                            LOGGER.error(e.getMessage());
-                            HttpResponse resp = new HttpResponse();
-                            resp.headers = e.getHeaders();
-                            resp.statusCode = e.getStatusCode().value();
-                            resp.body = e.getMessage();
-                            return Mono.just(resp);
-                        })
-                .block();
+        try {
+            return requestBodySpec
+                    .retrieve()
+                    .bodyToMono(JsonNode.class)
+                    .map(
+                            jsonNode -> {
+                                HttpResponse resp = new HttpResponse();
+                                resp.statusCode = HttpStatus.OK.value();
+                                resp.body = jsonNode;
+                                return resp;
+                            })
+                    .onErrorResume(
+                            WebClientResponseException.class,
+                            e -> {
+                                LOGGER.error(e.getMessage());
+                                HttpResponse resp = new HttpResponse();
+                                resp.headers = e.getHeaders();
+                                resp.statusCode = e.getStatusCode().value();
+                                resp.body = e.getMessage();
+                                return Mono.just(resp);
+                            })
+                    .block();
+        } catch (Exception ex) {
+            LOGGER.error(
+                    String.format(
+                            "Got unexpected http response - uri: %s, vipAddress: %s",
+                            input.getUri(), input.getVipAddress()),
+                    ex);
+            String reason = ex.getLocalizedMessage();
+            LOGGER.error(reason, ex);
+            throw new Exception(reason);
+        }
     }
 }
