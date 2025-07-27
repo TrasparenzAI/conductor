@@ -23,13 +23,13 @@ import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
 
-import com.netflix.conductor.core.exception.NotFoundException;
 import org.springframework.retry.support.RetryTemplate;
 
 import com.netflix.conductor.common.metadata.events.EventExecution;
 import com.netflix.conductor.common.metadata.tasks.TaskDef;
 import com.netflix.conductor.common.metadata.tasks.TaskType;
 import com.netflix.conductor.core.exception.NonTransientException;
+import com.netflix.conductor.core.exception.NotFoundException;
 import com.netflix.conductor.dao.ConcurrentExecutionLimitDAO;
 import com.netflix.conductor.dao.ExecutionDAO;
 import com.netflix.conductor.dao.RateLimitingDAO;
@@ -254,16 +254,15 @@ public class PostgresExecutionDAO extends PostgresBaseDAO
                     .ifPresent(
                             workflowId -> {
                                 try {
-                                    logger.trace(
-                                            "Try to delete workflow {}",
-                                            workflowId);
+                                    logger.trace("Try to delete workflow {}", workflowId);
                                     Optional.ofNullable(getWorkflow(workflowId))
                                             .ifPresent(
                                                     workflowModel -> {
                                                         getWorkflowChildIds(
-                                                                workflowModel.getWorkflowId(),
-                                                                workflowModel
-                                                                        .getCorrelationId())
+                                                                        workflowModel
+                                                                                .getWorkflowId(),
+                                                                        workflowModel
+                                                                                .getCorrelationId())
                                                                 .forEach(this::removeWorkflow);
                                                     });
                                     removeWorkflow(workflowId);
