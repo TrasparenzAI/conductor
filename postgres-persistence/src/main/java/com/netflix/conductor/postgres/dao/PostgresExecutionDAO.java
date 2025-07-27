@@ -23,6 +23,7 @@ import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
 
+import com.netflix.conductor.core.exception.NotFoundException;
 import org.springframework.retry.support.RetryTemplate;
 
 import com.netflix.conductor.common.metadata.events.EventExecution;
@@ -252,16 +253,23 @@ public class PostgresExecutionDAO extends PostgresBaseDAO
                     .map(String::valueOf)
                     .ifPresent(
                             workflowId -> {
-                                Optional.ofNullable(getWorkflow(workflowId))
-                                        .ifPresent(
-                                                workflowModel -> {
-                                                    getWorkflowChildIds(
-                                                                    workflowModel.getWorkflowId(),
-                                                                    workflowModel
-                                                                            .getCorrelationId())
-                                                            .forEach(this::removeWorkflow);
-                                                });
-                                removeWorkflow(workflowId);
+                                try {
+                                    logger.trace(
+                                            "Try to delete workflow {}",
+                                            workflowId);
+                                    Optional.ofNullable(getWorkflow(workflowId))
+                                            .ifPresent(
+                                                    workflowModel -> {
+                                                        getWorkflowChildIds(
+                                                                workflowModel.getWorkflowId(),
+                                                                workflowModel
+                                                                        .getCorrelationId())
+                                                                .forEach(this::removeWorkflow);
+                                                    });
+                                    removeWorkflow(workflowId);
+                                } catch (NotFoundException _ex) {
+                                    logger.trace(_ex.getMessage());
+                                }
                             });
         }
         if (task == null) {
