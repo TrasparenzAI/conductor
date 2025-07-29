@@ -419,25 +419,7 @@ public class ExecutionService {
     }
 
     public void removeWorkflow(String workflowId, boolean archiveWorkflow) {
-        WorkflowModel workflow = executionDAOFacade.getWorkflowModelFromDataStore(workflowId, true);
         executionDAOFacade.removeWorkflow(workflowId, archiveWorkflow);
-        CompletableFuture.runAsync(
-                () -> {
-                    executionDAOFacade
-                            .getWorkflowChildIds(workflowId, workflow.getCorrelationId())
-                            .forEach(
-                                    workflowChildId -> {
-                                        try {
-                                            LOGGER.trace(
-                                                    "Try to delete child workflow {}",
-                                                    workflowChildId);
-                                            removeWorkflow(workflowChildId, archiveWorkflow);
-                                        } catch (NotFoundException _ex) {
-                                            LOGGER.trace(_ex.getMessage());
-                                        }
-                                    });
-                    LOGGER.trace("Completed delete all workflow width parent {}", workflowId);
-                });
     }
 
     public SearchResult<WorkflowSummary> search(

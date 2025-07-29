@@ -215,11 +215,4 @@ public interface ExecutionDAO {
      */
     void removeEventExecution(EventExecution eventExecution);
 
-    /**
-     * @param workflowId id of the workflow
-     * @return List of workflow ids which are child
-     */
-    default List<String> getWorkflowChildIds(String workflowId, String correlationId) {
-        return Collections.emptyList();
-    }
 }

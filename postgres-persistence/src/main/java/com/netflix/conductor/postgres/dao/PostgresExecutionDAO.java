@@ -238,6 +238,7 @@ public class PostgresExecutionDAO extends PostgresBaseDAO
     @Override
     public boolean removeTask(String taskId) {
         TaskModel task = getTask(taskId);
+
         if (Optional.ofNullable(task)
                 .map(TaskModel::getTaskType)
                 .filter(
@@ -249,28 +250,19 @@ public class PostgresExecutionDAO extends PostgresBaseDAO
                     .map(
                             stringObjectMap ->
                                     Optional.ofNullable(stringObjectMap.get("workflowId"))
-                                            .orElseGet(() -> stringObjectMap.get("subWorkflowId")))
+                                            .orElseGet(task::getSubWorkflowId))
                     .map(String::valueOf)
                     .ifPresent(
                             workflowId -> {
                                 try {
                                     logger.trace("Try to delete workflow {}", workflowId);
-                                    Optional.ofNullable(getWorkflow(workflowId))
-                                            .ifPresent(
-                                                    workflowModel -> {
-                                                        getWorkflowChildIds(
-                                                                        workflowModel
-                                                                                .getWorkflowId(),
-                                                                        workflowModel
-                                                                                .getCorrelationId())
-                                                                .forEach(this::removeWorkflow);
-                                                    });
                                     removeWorkflow(workflowId);
                                 } catch (NotFoundException _ex) {
                                     logger.trace(_ex.getMessage());
                                 }
                             });
         }
+
         if (task == null) {
             logger.warn("No such task found by id {}", taskId);
             return false;
@@ -293,20 +285,6 @@ public class PostgresExecutionDAO extends PostgresBaseDAO
         String GET_TASK = "SELECT json_data FROM task WHERE task_id = ?";
         return queryWithTransaction(
                 GET_TASK, q -> q.addParameter(taskId).executeAndFetchFirst(TaskModel.class));
-    }
-
-    @Override
-    public List<String> getWorkflowChildIds(String workflowId, String correlationId) {
-        Preconditions.checkNotNull(workflowId, "workflowId cannot be null");
-        String GET_CHILD_WORKFLOW_IDS =
-                "SELECT workflow_id FROM workflow WHERE correlation_id = ? and json_data::json ->> 'parentWorkflowId' = ?";
-
-        return queryWithTransaction(
-                GET_CHILD_WORKFLOW_IDS,
-                q ->
-                        q.addParameter(correlationId)
-                                .addParameter(workflowId)
-                                .executeScalarList(String.class));
     }
 
     @Override
