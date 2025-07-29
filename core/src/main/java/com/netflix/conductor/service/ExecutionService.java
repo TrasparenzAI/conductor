@@ -13,7 +13,6 @@
 package com.netflix.conductor.service;
 
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -42,7 +41,6 @@ import com.netflix.conductor.core.utils.Utils;
 import com.netflix.conductor.dao.QueueDAO;
 import com.netflix.conductor.metrics.Monitors;
 import com.netflix.conductor.model.TaskModel;
-import com.netflix.conductor.model.WorkflowModel;
 
 @Trace
 @Service
