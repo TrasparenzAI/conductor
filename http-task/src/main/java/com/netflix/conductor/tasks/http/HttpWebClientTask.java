@@ -97,6 +97,11 @@ public class HttpWebClientTask extends HttpTask {
             return requestBodySpec
                     .retrieve()
                     .bodyToMono(JsonNode.class)
+                    .switchIfEmpty(
+                            Mono.fromSupplier(
+                                    () -> {
+                                        return new ObjectMapper().createObjectNode();
+                                    }))
                     .map(
                             jsonNode -> {
                                 HttpResponse resp = new HttpResponse();
