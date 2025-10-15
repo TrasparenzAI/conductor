@@ -56,6 +56,9 @@ public class OIDCConfiguration {
         if (oidcProperties.isEnabled()) {
             http.authorizeHttpRequests(
                             expressionInterceptUrlRegistry -> {
+                                expressionInterceptUrlRegistry
+                                        .requestMatchers(HttpMethod.GET, "/api/queue/*").hasRole("ADMIN")
+                                        .requestMatchers(HttpMethod.GET, "/api/admin/*").hasRole("ADMIN");
                                 oidcProperties
                                         .getRoles()
                                         .forEach(
