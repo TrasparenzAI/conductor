@@ -81,6 +81,7 @@ public class TaskResource {
         // for backwards compatibility with 2.x client which expects a 204 when no Task is found
         return Optional.ofNullable(
                         taskService.batchPoll(taskType, workerId, domain, count, timeout))
+                .filter(tasks -> !tasks.isEmpty())
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.noContent().build());
     }
@@ -151,8 +152,12 @@ public class TaskResource {
 
     @GetMapping("/{taskId}/log")
     @Operation(summary = "Get Task Execution Logs")
-    public List<TaskExecLog> getTaskLogs(@PathVariable("taskId") String taskId) {
-        return taskService.getTaskLogs(taskId);
+    public ResponseEntity<List<TaskExecLog>> getTaskLogs(@PathVariable("taskId") String taskId) {
+        return Optional.ofNullable(taskService.getTaskLogs(taskId))
+                .filter(logs -> !logs.isEmpty())
+                .map(ResponseEntity::ok)
+                .orElseThrow(
+                        () -> new NotFoundException("Task logs not found for taskId: %s", taskId));
     }
 
     @GetMapping("/{taskId}")
@@ -161,7 +166,7 @@ public class TaskResource {
         // for backwards compatibility with 2.x client which expects a 204 when no Task is found
         return Optional.ofNullable(taskService.getTask(taskId))
                 .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.noContent().build());
+                .orElseThrow(() -> new NotFoundException("Task not found for taskId: %s", taskId));
     }
 
     @GetMapping("/queue/sizes")

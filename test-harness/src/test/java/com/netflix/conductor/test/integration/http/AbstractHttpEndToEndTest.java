@@ -448,7 +448,7 @@ public abstract class AbstractHttpEndToEndTest extends AbstractEndToEndTest {
             taskClient.getTaskDetails("test999");
         } catch (ConductorClientException e) {
             assertEquals(404, e.getStatus());
-            assertEquals("No such task found by taskId: test999", e.getMessage());
+            assertEquals("Task not found for taskId: test999", e.getMessage());
         }
     }
 
@@ -498,7 +498,7 @@ public abstract class AbstractHttpEndToEndTest extends AbstractEndToEndTest {
         }
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test(expected = ConductorClientException.class)
     public void testGetTaskDefNotExisting() {
         metadataClient.getTaskDef("");
     }
