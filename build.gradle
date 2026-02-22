@@ -27,7 +27,7 @@ plugins {
 // Establish version and status
 ext.githubProjectName = rootProject.name // Change if github project name is not the same as the root project's name
 
-ext["tomcat.version"] = "10.1.41"
+ext["tomcat.version"] = "10.1.45"
 
 subprojects {
     tasks.withType(Javadoc).all { enabled = false }
@@ -44,12 +44,12 @@ allprojects {
 
     java {
         toolchain {
-            languageVersion = JavaLanguageVersion.of(17)
+            languageVersion = JavaLanguageVersion.of(21)
         }
     }
 
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
 
     group = 'org.conductoross'
 
@@ -63,6 +63,10 @@ allprojects {
             resolutionStrategy.eachDependency { details ->
                 if (details.requested.group.startsWith('com.fasterxml.jackson.') ) {
                     details.useVersion "2.18.0"
+                }
+                // Force commons-lang3 to 3.18.0+ for compatibility with commons-compress used by Testcontainers
+                if (details.requested.group == 'org.apache.commons' && details.requested.name == 'commons-lang3') {
+                    details.useVersion "3.18.0"
                 }
             }
         }
@@ -86,6 +90,7 @@ allprojects {
         implementation('org.apache.logging.log4j:log4j-jul')
         implementation('org.apache.logging.log4j:log4j-web')
         implementation "com.fasterxml.jackson.datatype:jackson-datatype-jsr310"
+        implementation "com.networknt:json-schema-validator:${revJSonSchemaValidator}"
         compileOnly 'org.projectlombok:lombok:1.18.34'
 
         annotationProcessor 'org.projectlombok:lombok:1.18.34'
@@ -127,7 +132,7 @@ allprojects {
 ["annotations", "common", "grpc", "grpc-client"].each {
     project(":conductor-$it") {
         compileJava {
-            options.release = 17
+            options.release = 21
         }
     }
 }
