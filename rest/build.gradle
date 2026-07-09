@@ -1,13 +1,12 @@
 dependencies {
-
     implementation project(':conductor-common')
     implementation project(':conductor-core')
-
     implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.security:spring-security-oauth2-resource-server'
+    implementation 'org.springframework.security:spring-security-oauth2-jose'
     implementation "com.netflix.runtime:health-api:${revHealth}"
-
     implementation "io.projectreactor.netty:reactor-netty-http:${revReactor}"
     implementation "org.springdoc:springdoc-openapi-starter-webmvc-ui:${revSpringDoc}"
-
     testImplementation "io.projectreactor:reactor-test:3.5.11"
 }

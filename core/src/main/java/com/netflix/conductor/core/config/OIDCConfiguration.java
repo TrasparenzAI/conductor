@@ -58,7 +58,8 @@ public class OIDCConfiguration {
                             expressionInterceptUrlRegistry -> {
                                 expressionInterceptUrlRegistry
                                         .requestMatchers(HttpMethod.GET, "/api/queue/*").hasRole("ADMIN")
-                                        .requestMatchers(HttpMethod.GET, "/api/admin/*").hasRole("ADMIN");
+                                        .requestMatchers(HttpMethod.GET, "/api/admin/*").hasRole("ADMIN")
+                                        .requestMatchers(HttpMethod.POST, "/api/transparency/*").hasRole(oidcProperties.getRpctRoleName());
                                 oidcProperties
                                         .getRoles()
                                         .forEach(

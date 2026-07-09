@@ -33,5 +33,10 @@ public class OIDCProperties {
     /** Name of the roles */
     private Map<String, String[]> roles = Collections.emptyMap();
 
+    private String rpctRoleName = "RPCT";
+
+    /** Nome del claim del JWT che contiene la lista dei codici IPA autorizzati per l'utente. */
+    private String ipaClaim = "rpct_ipas";
+
     private int clientMaxInMemorySize = 2 * 1024 * 1024;
 }
