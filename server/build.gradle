@@ -20,6 +20,9 @@ dependencies {
     implementation project(':conductor-rest')
     implementation project(':conductor-grpc-server')
     implementation project(':conductor-ai')
+    // Embedded Conductor-Agents runtime (REST controllers, agent services); activated only when
+    // conductor.integrations.ai.enabled=true.
+    implementation project(':conductor-agentspan')
 
     //Event Systems
     implementation project(':conductor-amqp')
@@ -32,9 +35,12 @@ dependencies {
     implementation project(':conductor-azureblob-storage')
     implementation project(':conductor-postgres-external-storage')
     implementation project(':conductor-awss3-storage')
+    implementation project(':conductor-file-storage')
+    implementation project(':conductor-gcs-storage')
 
 
     //Persistence
+    implementation project(':conductor-redis-configuration')
     implementation project(':conductor-redis-persistence')
     implementation project(':conductor-cassandra-persistence')
     implementation project(':conductor-postgres-persistence')
@@ -43,17 +49,19 @@ dependencies {
 
     // Indexing backend selection (build-time) to avoid Lucene conflicts between ES and OS
     def indexingBackend = project.findProperty('indexingBackend') ?: 'elasticsearch'
-    if (indexingBackend == 'opensearch' || indexingBackend == 'os') {
+
+    if (indexingBackend == 'opensearch3' || indexingBackend == 'os3') {
+        implementation project(':conductor-os-persistence-v3')
+    } else if (indexingBackend == 'opensearch' || indexingBackend == 'os') {
         implementation project(':conductor-os-persistence')
         implementation project(':conductor-os-persistence-v2')
-        // os-persistence-v3 excluded: requires API migration to opensearch-java 3.x
-        // The DAO layer needs reimplementation for the new client API (breaking changes)
-        // See: os-persistence-v3/build.gradle comments for details
-        // implementation project(':conductor-os-persistence-v3')
+    } else if (indexingBackend == 'elasticsearch8' || indexingBackend == 'es8') {
+        implementation project(':conductor-es8-persistence')
+    } else if (indexingBackend == 'elasticsearch7' || indexingBackend == 'es7' || indexingBackend == 'elasticsearch') {
+        implementation project(':conductor-es7-persistence')
     } else {
         implementation project(':conductor-es7-persistence')
     }
-
     implementation project(':conductor-redis-lock')
     implementation project(':conductor-redis-concurrency-limit')
 
@@ -62,8 +70,23 @@ dependencies {
     implementation project(':conductor-json-jq-task')
     implementation project(':conductor-kafka')
 
+    //Scheduler
+    implementation project(':conductor-scheduler-core')
+    implementation project(':conductor-scheduler-postgres-persistence')
+    implementation project(':conductor-scheduler-mysql-persistence')
+    implementation project(':conductor-scheduler-cassandra-persistence')
+    implementation project(':conductor-scheduler-redis-persistence')
+    implementation project(':conductor-scheduler-sqlite-persistence')
+
     //Metrics
-    implementation project(':conductor-metrics')
+    implementation "io.micrometer:micrometer-registry-cloudwatch2:${revMicrometerRegistry}"
+    implementation "io.micrometer:micrometer-registry-azure-monitor:${revMicrometerRegistry}"
+    implementation "io.micrometer:micrometer-registry-prometheus:${revMicrometerRegistry}"
+    // Restores OTLP metrics export removed when the conductor-metrics module was
+    // retired (commit 396a09a4f, #1059). Spring Boot's OtlpMetricsAutoConfiguration
+    // wires OtlpMeterRegistry when management.otlp.metrics.export.enabled=true,
+    // mirroring how the prometheus registry is auto-configured.
+    implementation "io.micrometer:micrometer-registry-otlp:${revMicrometerRegistry}"
 
     //Event Listener
     implementation project(':conductor-workflow-event-listener')
@@ -80,14 +103,19 @@ dependencies {
     implementation "org.postgresql:postgresql:${revPostgres}"
 
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
-    implementation ("io.orkes.queues:orkes-conductor-queues:${revOrkesQueues}") {
-    	exclude group: 'com.netflix.conductor', module: 'conductor-core'
-    }
+    implementation "io.orkes.queues:orkes-conductor-queues:${revOrkesQueues}"
 
     implementation "org.springdoc:springdoc-openapi-starter-webmvc-ui:${revSpringDoc}"
 
 
     runtimeOnly "org.glassfish.jaxb:jaxb-runtime:${revJAXB}"
+
+    // reactor-netty brings netty-transport-classes-epoll along with the linux-x86_64 native library
+    // only. The cassandra driver probes for the epoll transport with Class.forName (NettyUtil), and
+    // on linux-aarch_64 the missing native library surfaces as an UnsatisfiedLinkError, which the
+    // driver does not catch - the server then fails to start on arm64. Ship both architectures.
+    runtimeOnly group: 'io.netty', name: 'netty-transport-native-epoll', classifier: 'linux-x86_64'
+    runtimeOnly group: 'io.netty', name: 'netty-transport-native-epoll', classifier: 'linux-aarch_64'
 
     testImplementation project(':conductor-rest')
     testImplementation project(':conductor-common')
@@ -103,6 +131,10 @@ jar {
 
 bootJar {
     mainClass = 'com.netflix.conductor.Conductor'
+    manifest {
+        attributes('Implementation-Title': project.name,
+                'Implementation-Version': project.version)
+    }
     archiveClassifier = 'boot'
 }
 

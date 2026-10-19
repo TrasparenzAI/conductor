@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
@@ -42,6 +43,7 @@ import com.netflix.conductor.mysql.util.Query;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -230,12 +232,97 @@ public class MySQLQueueDAOTest {
     }
 
     /**
+     * Test fix for https://github.com/conductor-oss/conductor/issues/142
+     *
+     * <p>When fewer than {@code count} messages are available, pollMessages should return as soon
+     * as at least one message is available rather than blocking for the full timeout waiting to
+     * fill the whole batch.
+     */
+    @Test
+    public void pollMessagesReturnsPromptlyWhenFewerThanCountAvailable() {
+        final String queueName = "issue142_testQueue";
+        // Only one message in the queue...
+        queueDAO.push(queueName, "issue142-msg-0", 0);
+        assertEquals("Queue size mismatch", 1, queueDAO.getSize(queueName));
+
+        // ...but poll asking for a much larger batch with a long timeout.
+        final int requestedCount = 5;
+        final int timeoutMs = 10_000;
+
+        long start = System.currentTimeMillis();
+        List<Message> polled = queueDAO.pollMessages(queueName, requestedCount, timeoutMs);
+        long elapsed = System.currentTimeMillis() - start;
+
+        assertNotNull("Poll was null", polled);
+        assertEquals("Should return the one available message", 1, polled.size());
+        assertTrue(
+                "pollMessages blocked for " + elapsed + "ms; should have returned promptly",
+                elapsed < timeoutMs / 2);
+    }
+
+    /**
+     * Companion to {@link #pollMessagesReturnsPromptlyWhenFewerThanCountAvailable()} guarding the
+     * other side of the long-poll contract for
+     * https://github.com/conductor-oss/conductor/issues/142
+     *
+     * <p>When the queue is empty, pollMessages must keep waiting until the timeout rather than
+     * returning an empty result immediately. The poll loop guards on what was actually popped, so
+     * an empty peek must not short-circuit the long poll into an immediate empty return (which
+     * would make workers busy-poll the DB at round-trip speed instead of long-polling).
+     */
+    @Test
+    public void pollMessagesBlocksUntilTimeoutWhenQueueEmpty() {
+        final String queueName = "issue142_emptyQueue";
+        assertEquals("Queue should start empty", 0, queueDAO.getSize(queueName));
+
+        final int timeoutMs = 1_000;
+
+        long start = System.currentTimeMillis();
+        List<Message> polled = queueDAO.pollMessages(queueName, 5, timeoutMs);
+        long elapsed = System.currentTimeMillis() - start;
+
+        assertNotNull("Poll was null", polled);
+        assertTrue("Empty queue should return no messages", polled.isEmpty());
+        assertTrue(
+                "pollMessages returned after " + elapsed + "ms; should have waited out the timeout",
+                elapsed >= timeoutMs);
+    }
+
+    /**
+     * Companion to {@link #pollMessagesBlocksUntilTimeoutWhenQueueEmpty()} for
+     * https://github.com/conductor-oss/conductor/issues/142
+     *
+     * <p>A poll for zero messages must return immediately with an empty result rather than blocking
+     * for the full timeout. The long-poll loop only waits while nothing has been popped, so a
+     * {@code count == 0} request (which can never pop anything) has to short-circuit up front --
+     * even when the queue has messages waiting.
+     */
+    @Test
+    public void pollMessagesReturnsImmediatelyWhenCountIsZero() {
+        final String queueName = "issue142_zeroCountQueue";
+        queueDAO.push(queueName, "issue142-msg-0", 0);
+        assertEquals("Queue size mismatch", 1, queueDAO.getSize(queueName));
+
+        final int timeoutMs = 10_000;
+
+        long start = System.currentTimeMillis();
+        List<Message> polled = queueDAO.pollMessages(queueName, 0, timeoutMs);
+        long elapsed = System.currentTimeMillis() - start;
+
+        assertNotNull("Poll was null", polled);
+        assertTrue("Zero-count poll should return no messages", polled.isEmpty());
+        assertTrue(
+                "pollMessages blocked for " + elapsed + "ms; should have returned immediately",
+                elapsed < timeoutMs / 2);
+    }
+
+    /**
      * Test fix for https://github.com/Netflix/conductor/issues/448
      *
      * @since 1.8.2-rc5
      */
     @Test
-    public void pollDeferredMessagesTest() throws InterruptedException {
+    public void pollDeferredMessagesTest() {
         final List<Message> messages = new ArrayList<>();
         final String queueName = "issue448_testQueue";
         final int totalSize = 10;
@@ -283,9 +370,20 @@ public class MySQLQueueDAOTest {
 
         final int secondPollSize = 3;
 
-        // Sleep a bit to get the next batch of messages
-        LOGGER.debug("Sleeping for second poll...");
-        Thread.sleep(5_000);
+        // Wait for delayed messages to become available for polling
+        final String COUNT_READY =
+                "SELECT COUNT(*) FROM queue_message WHERE queue_name = ? AND popped = false AND deliver_on <= CURRENT_TIMESTAMP";
+        await().atMost(10, TimeUnit.SECONDS)
+                .pollInterval(500, TimeUnit.MILLISECONDS)
+                .until(
+                        () -> {
+                            try (Connection c = dataSource.getConnection()) {
+                                try (Query q = new Query(objectMapper, c, COUNT_READY)) {
+                                    return q.addParameter(queueName).executeCount()
+                                            >= secondPollSize;
+                                }
+                            }
+                        });
 
         // Poll for many more messages than expected
         List<Message> secondPoll = queueDAO.pollMessages(queueName, secondPollSize + 10, 100);
@@ -317,6 +415,85 @@ public class MySQLQueueDAOTest {
         } catch (Exception ex) {
             fail(ex.getMessage());
         }
+    }
+
+    @Test
+    public void setUnackTimeoutIfShorterShortensDueTime() {
+        String queueName = "setUnackIfShorter_shorten";
+        String messageId = "msg-shorten";
+
+        // Push with a 1-hour delay so it is not immediately poppable
+        queueDAO.push(queueName, messageId, 3600L);
+        assertEquals(0, queueDAO.pop(queueName, 1, 100).size());
+
+        // Shorten delivery to now (0 s) — should succeed and return true
+        boolean shortened = queueDAO.setUnackTimeoutIfShorter(queueName, messageId, 0L);
+        assertTrue(
+                "setUnackTimeoutIfShorter should return true when it actually shortens", shortened);
+
+        // Message must now be immediately poppable
+        List<String> popped = queueDAO.pop(queueName, 1, 100);
+        assertEquals(1, popped.size());
+        assertEquals(messageId, popped.get(0));
+    }
+
+    @Test
+    public void setUnackTimeoutIfShorterDoesNotExtend() {
+        String queueName = "setUnackIfShorter_noextend";
+        String messageId = "msg-noextend";
+
+        // Push with offset 0 so it is immediately available
+        queueDAO.push(queueName, messageId, 0L);
+
+        // Try to push deliver_on far into the future — must be rejected
+        boolean extended = queueDAO.setUnackTimeoutIfShorter(queueName, messageId, 3_600_000L);
+        assertFalse(
+                "setUnackTimeoutIfShorter must not extend an already-closer delivery time",
+                extended);
+
+        // Message must still be immediately poppable
+        List<String> popped = queueDAO.pop(queueName, 1, 100);
+        assertEquals(1, popped.size());
+        assertEquals(messageId, popped.get(0));
+    }
+
+    @Test
+    public void setUnackTimeoutIfShorterReturnsFalseForNonExistent() {
+        String queueName = "setUnackIfShorter_nonexistent";
+        boolean updated = queueDAO.setUnackTimeoutIfShorter(queueName, "no-such-message", 0L);
+        assertFalse(
+                "setUnackTimeoutIfShorter must return false for a non-existent message", updated);
+    }
+
+    @Test
+    public void setUnackTimeoutIfShorterReturnsFalseWhenEqualTimeout() {
+        String queueName = "setUnackIfShorter_equal";
+        String messageId = "msg-equal";
+        queueDAO.push(queueName, messageId, 0L);
+
+        boolean result = queueDAO.setUnackTimeoutIfShorter(queueName, messageId, 0L);
+        assertFalse("Equal timeout must not update deliver_on — returns false", result);
+
+        List<String> popped = queueDAO.pop(queueName, 1, 100);
+        assertEquals(1, popped.size());
+        assertEquals(messageId, popped.get(0));
+    }
+
+    @Test
+    public void setUnackTimeoutIfShorterRejectsExtensionThenAcceptsShortening() {
+        String queueName = "setUnackIfShorter_reject_then_accept";
+        String messageId = "msg-reject-accept";
+        queueDAO.push(queueName, messageId, 3600L);
+
+        boolean extended = queueDAO.setUnackTimeoutIfShorter(queueName, messageId, 7_200_000L);
+        assertFalse("Extending must return false", extended);
+
+        boolean shortened = queueDAO.setUnackTimeoutIfShorter(queueName, messageId, 0L);
+        assertTrue("Shortening to now must return true", shortened);
+
+        List<String> popped = queueDAO.pop(queueName, 1, 100);
+        assertEquals(1, popped.size());
+        assertEquals(messageId, popped.get(0));
     }
 
     @Test

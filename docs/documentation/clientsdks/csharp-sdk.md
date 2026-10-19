@@ -1,189 +1,47 @@
+---
+description: "Build Conductor workers and clients in C#/.NET with the official generated SDK."
+source_repo: "https://github.com/conductor-oss/csharp-sdk"
+sdk_page: csharp
+---
+
 # C# SDK
 
-`conductor-csharp` repository provides the client SDKs to build Task Workers and Clients in C#
+## Install the SDK
 
-The code for the C# SDk is available on [Github](https://github.com/conductor-oss/clojure-sdk). Please feel free to file PRs, issues, etc. there.
-
-
-## Quick Start
-1. [Get Secrets](#Get-Secrets)
-2. [Write workers](#Write-workers)
-3. [Run workers](#Run-workers)
-4. [Worker Configurations](#Worker-Configurations)
-
-### Dependencies
-`conductor-csharp` packages are published to nugget package manager.  You can find the latest releases [here](https://www.nuget.org/packages/conductor-csharp/).
-
-### Write workers  
-
-```
- internal class MyWorkflowTask : IWorkflowTask
-    {
-        public MyWorkflowTask(){}
-
-        public string TaskType => "test_ctask";
-        public int? Priority => null;
-
-        public async Task<TaskResult> Execute(Conductor.Client.Models.Task task, CancellationToken token)
-        {
-           Dictionary<string, object> newOutput = new Dictionary<string, object>();
-           newOutput.Add("output", "1");
-           return task.Completed(task.OutputData.MergeValues(newOutput));
-        }
-    }
-
- internal class MyWorkflowTask2 : IWorkflowTask
-    {
-        public MyWorkflowTask2(){}
-
-        public string TaskType => "test_ctask2";
-        public int? Priority => null;
-
-        public async Task<TaskResult> Execute(Conductor.Client.Models.Task task, CancellationToken token)
-        {
-           Dictionary<string, object> newOutput = new Dictionary<string, object>();
-           //Reuse the existing code written in C#
-           newOutput.Add("output", "success");
-           return task.Completed(task.OutputData.MergeValues(newOutput));
-        }
-    }
+```shell
+dotnet add package conductor-csharp --version VERSION
 ```
 
-### Run workers
+## Configure a workflow client
 
-```
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Collections.Generic;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using Conductor.Client.Models;
-using Conductor.Client.Extensions;
-using Conductor.Client.Interfaces;
+The SDK quickstart configures the endpoint from the environment and uses the workflow executor API:
 
-using Task = System.Threading.Tasks.Task;
+```csharp
 using Conductor.Client;
-using System.Collections.Concurrent;
+using Conductor.Definition;
+using Conductor.Definition.TaskType;
+using Conductor.Executor;
 
-namespace TestOrkesSDK
-{
-    class Program
-    {
-        static void Main(string[] args)
-        {
-            new HostBuilder()
-                 .ConfigureServices((ctx, services) =>
-                 {
-                    // First argument is optional headers which client wasnt to pass.
-                     Configuration configuration = new Configuration(new ConcurrentDictionary<string, string>(), 
-                         "KEY",
-                         "SECRET");
-                     services.AddConductorWorker(configuration);
-                     services.AddConductorWorkflowTask<MyWorkflowTask>();
-                     services.AddHostedService<WorkflowsWorkerService>();
-                 })
-                 .ConfigureLogging(logging =>
-                 {
-                     logging.SetMinimumLevel(LogLevel.Debug);
-                     logging.AddConsole();
-                 })
-                 .RunConsoleAsync();
-            Console.ReadLine();
-        }
-    }
+var configuration = new Configuration {
+    BasePath = Environment.GetEnvironmentVariable("CONDUCTOR_SERVER_URL")
+        ?? "http://localhost:8080/api"
+};
 
-    internal class MyWorkflowTask : IWorkflowTask
-    {
-        public MyWorkflowTask() { }
+var workflow = new ConductorWorkflow()
+    .WithName("greetings")
+    .WithVersion(1);
 
-        public string TaskType => "my_ctask";
-        public int? Priority => null;
+var greetTask = new SimpleTask("greet", "greet_ref")
+    .WithInput("name", workflow.Input("name"));
+workflow.WithTask(greetTask);
 
-        public async Task<TaskResult> Execute(Conductor.Client.Models.Task task, CancellationToken token)
-        {
-            Dictionary<string, object> newOutput = new Dictionary<string, object>();
-            newOutput.Add("output", 1);
-            return task.Completed(task.OutputData.MergeValues(newOutput));
-        }
-    }
-}
+var executor = new WorkflowExecutor(configuration);
+executor.RegisterWorkflow(workflow, overwrite: true);
+var workflowId = executor.StartWorkflow(new StartWorkflowRequest {
+    Name = "greetings",
+    Version = 1,
+    Input = new Dictionary<string, object> { ["name"] = "Conductor" }
+});
 ```
 
-####Note:
-Replace KEY and SECRET by obtaining a new key and secret from [Orkes Playground](https://developer.orkescloud.com/)
-
-Refer to [Authentication](https://orkes.io/content/sdks/authentication) for details.
-
-```
-    internal class WorkflowsWorkerService : BackgroundService
-    {
-        private readonly IWorkflowTaskCoordinator workflowTaskCoordinator;
-        private readonly IEnumerable<IWorkflowTask> workflowTasks;
-
-        public WorkflowsWorkerService(
-            IWorkflowTaskCoordinator workflowTaskCoordinator,
-            IEnumerable<IWorkflowTask> workflowTasks
-        )
-        {
-            this.workflowTaskCoordinator = workflowTaskCoordinator;
-            this.workflowTasks = workflowTasks;
-        }
-
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-        {
-            foreach (var worker in workflowTasks)
-            {
-                workflowTaskCoordinator.RegisterWorker(worker);
-            }
-            // start all the workers so that it can poll for the tasks
-            await workflowTaskCoordinator.Start();
-        }
-    }
-```
-
-### Worker Configurations
-Worker configuration is handled via Configuration object passed when initializing TaskHandler.
-```
-Configuration configuration = 
-    new Configuration(new ConcurrentDictionary<string, string>(), "KEY", "SECRET", "https://developer.orkescloud.com/");
-```
-
-### Registering and starting the workflow using SDK.
-
-Below is the code snippet that shows how to register a simple workflow and start execution:
-
-```
-IDictionary<string, string> optionalHeaders = new ConcurrentDictionary<string, string>();
-Configuration configuration = new Configuration(optionalHeaders, "keyId", "keySecret");
-
-//Create task definition
-MetadataResourceApi metadataResourceApi = new MetadataResourceApi(configuration);
-TaskDef taskDef = new TaskDef(name: "test_task");
-taskDef.OwnerEmail = "test@test.com";
-metadataResourceApi.RegisterTaskDef(new List<TaskDef>() { taskDef});
-
-//Create workflow definition
-WorkflowDef workflowDef = new WorkflowDef();
-workflowDef.Name = "test_workflow";
-workflowDef.OwnerEmail = "test@test.com";
-workflowDef.SchemaVersion = 2;
-
-WorkflowTask workflowTask = new WorkflowTask();
-workflowTask.Type = "HTTP";
-workflowTask.Name = "test_"; //Same as registered task definition.
-IDictionary<string, string> requestParams = new Dictionary<string, string>();
-requestParams.Add("uri", "https://www.google.com"); //adding a key/value using the Add() method
-requestParams.Add("method", "GET");
-Dictionary<string, object> request = new Dictionary<string, object>();
-request.Add("http_request", requestParams);
-workflowTask.InputParameters = request;
-workflowDef.Tasks = new List<WorkflowTask>() { workflowTask };
-//Run a workflow
-WorkflowResourceApi workflowResourceApi = new WorkflowResourceApi(configuration);
-Dictionary<string, Object> input = new Dictionary<string, Object>();
-//Fill the input map which workflow consumes.
-workflowResourceApi.StartWorkflow("test_workflow", input, 1);
-Console.ReadLine();
-```
+For Orkes authentication, the SDK exposes `Configuration.AuthenticationSettings`; create an `OrkesAuthenticationSettings` from `CONDUCTOR_AUTH_KEY` and `CONDUCTOR_AUTH_SECRET` before constructing clients. It does not do that environment mapping automatically. See the [upstream SDK README](https://github.com/conductor-oss/csharp-sdk#configurations) for its authentication and worker examples.

@@ -13,16 +13,22 @@
 package org.conductoross.conductor.ai.providers.openai;
 
 import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
 
-import org.conductoross.conductor.ai.models.ChatCompletion;
-import org.conductoross.conductor.ai.models.EmbeddingGenRequest;
-import org.conductoross.conductor.ai.models.ImageGenRequest;
+import org.conductoross.conductor.ai.model.ChatCompletion;
+import org.conductoross.conductor.ai.model.EmbeddingGenRequest;
+import org.conductoross.conductor.ai.model.ImageGenRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.content.Media;
+import org.springframework.util.MimeTypeUtils;
+
+import okhttp3.OkHttpClient;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -39,7 +45,7 @@ class OpenAITest {
         void setUp() {
             OpenAIConfiguration config = new OpenAIConfiguration();
             config.setApiKey("test-api-key");
-            openAI = new OpenAI(config);
+            openAI = new OpenAI(config, new OkHttpClient());
         }
 
         @Test
@@ -58,6 +64,8 @@ class OpenAITest {
             var options = openAI.getChatOptions(input);
 
             assertNotNull(options);
+            assertInstanceOf(OpenAIResponsesChatOptions.class, options);
+            assertEquals("gpt-4o-mini", options.getModel());
         }
 
         @Test
@@ -70,12 +78,89 @@ class OpenAITest {
             var options = openAI.getChatOptions(input);
 
             assertNotNull(options);
+            assertInstanceOf(OpenAIResponsesChatOptions.class, options);
+        }
+
+        @Test
+        void testGetChatOptions_withPreviousResponseId() {
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("gpt-4o");
+            input.setPreviousResponseId("resp_abc123");
+
+            var options = openAI.getChatOptions(input);
+
+            assertInstanceOf(OpenAIResponsesChatOptions.class, options);
+            OpenAIResponsesChatOptions responsesOpts = (OpenAIResponsesChatOptions) options;
+            assertEquals("resp_abc123", responsesOpts.getPreviousResponseId());
+        }
+
+        @Test
+        void testGetChatOptions_reasoningModelDisablesTemperature() {
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("o3");
+            input.setTemperature(0.7);
+            input.setTopP(0.9);
+            input.setReasoningEffort("medium");
+
+            var options = openAI.getChatOptions(input);
+            assertInstanceOf(OpenAIResponsesChatOptions.class, options);
+            OpenAIResponsesChatOptions responsesOpts = (OpenAIResponsesChatOptions) options;
+            assertNull(responsesOpts.getTemperature());
+            assertNull(responsesOpts.getTopP());
+            assertEquals("medium", responsesOpts.getReasoningEffort());
+        }
+
+        @Test
+        void testGetChatOptions_withWebSearch() {
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("gpt-4o");
+            input.setMaxTokens(500);
+            input.setWebSearch(true);
+
+            var options = openAI.getChatOptions(input);
+
+            assertInstanceOf(OpenAIResponsesChatOptions.class, options);
+            OpenAIResponsesChatOptions responsesOpts = (OpenAIResponsesChatOptions) options;
+            assertNotNull(responsesOpts.getResponsesApiTools());
+            assertFalse(responsesOpts.getResponsesApiTools().isEmpty());
+            assertEquals("web_search", responsesOpts.getResponsesApiTools().getFirst().type());
+        }
+
+        @Test
+        void testGetChatOptions_withCodeInterpreter() {
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("gpt-4o");
+            input.setMaxTokens(500);
+            input.setCodeInterpreter(true);
+
+            var options = openAI.getChatOptions(input);
+
+            assertInstanceOf(OpenAIResponsesChatOptions.class, options);
+            OpenAIResponsesChatOptions responsesOpts = (OpenAIResponsesChatOptions) options;
+            assertNotNull(responsesOpts.getResponsesApiTools());
+            assertEquals(
+                    "code_interpreter", responsesOpts.getResponsesApiTools().getFirst().type());
+        }
+
+        @Test
+        void testGetChatOptions_withFileSearch() {
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("gpt-4o");
+            input.setMaxTokens(500);
+            input.setFileSearchVectorStoreIds(List.of("vs_abc123"));
+
+            var options = openAI.getChatOptions(input);
+
+            assertInstanceOf(OpenAIResponsesChatOptions.class, options);
+            OpenAIResponsesChatOptions responsesOpts = (OpenAIResponsesChatOptions) options;
+            assertNotNull(responsesOpts.getResponsesApiTools());
+            assertEquals("file_search", responsesOpts.getResponsesApiTools().getFirst().type());
         }
 
         @Test
         void testGetImageOptions() {
             ImageGenRequest input = new ImageGenRequest();
-            input.setModel("dall-e-3");
+            input.setModel("gpt-image-1");
             input.setHeight(1024);
             input.setWidth(1024);
             input.setN(1);
@@ -90,12 +175,14 @@ class OpenAITest {
         void testGetChatModel_createsModel() {
             var chatModel = openAI.getChatModel();
             assertNotNull(chatModel);
+            assertInstanceOf(OpenAIResponsesChatModel.class, chatModel);
         }
 
         @Test
         void testGetImageModel_createsModel() {
             var imageModel = openAI.getImageModel();
             assertNotNull(imageModel);
+            assertInstanceOf(OpenAIHttpImageModel.class, imageModel);
         }
     }
 
@@ -109,7 +196,7 @@ class OpenAITest {
         void setUp() {
             OpenAIConfiguration config = new OpenAIConfiguration();
             config.setApiKey(System.getenv(ENV_API_KEY));
-            openAI = new OpenAI(config);
+            openAI = new OpenAI(config, new OkHttpClient());
         }
 
         @Test
@@ -128,6 +215,94 @@ class OpenAITest {
             assertNotNull(response);
             assertNotNull(response.getResult());
             assertNotNull(response.getResult().getOutput());
+            assertFalse(response.getResult().getOutput().getText().isEmpty());
+        }
+
+        @Test
+        void testChatCompletionWithImageMedia() throws Exception {
+            // Live lock for OpenAI media input (Responses API input_image parts).
+            // The image embeds a machine-unguessable token, so a correct transcription
+            // can only come from the image actually reaching the model.
+            byte[] png =
+                    Objects.requireNonNull(
+                                    getClass().getResourceAsStream("/media/melon7391.png"),
+                                    "test asset /media/melon7391.png missing")
+                            .readAllBytes();
+
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("gpt-4o-mini");
+            input.setMaxTokens(100);
+
+            UserMessage userMsg =
+                    UserMessage.builder()
+                            .text(
+                                    "Transcribe the exact text shown in the image. Reply with"
+                                            + " only that text and nothing else.")
+                            .media(
+                                    List.of(
+                                            Media.builder()
+                                                    .data(png)
+                                                    .mimeType(MimeTypeUtils.IMAGE_PNG)
+                                                    .build()))
+                            .build();
+
+            var response =
+                    openAI.getChatModel()
+                            .call(new Prompt(List.of(userMsg), openAI.getChatOptions(input)));
+
+            String text = response.getResult().getOutput().getText();
+            assertNotNull(text);
+            assertTrue(
+                    text.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "").contains("MELON7391"),
+                    "vision model must transcribe the embedded token MELON7391; got: " + text);
+        }
+
+        @Test
+        @EnabledIfEnvironmentVariable(named = "OPENAI_CODEX_MODEL", matches = ".+")
+        void testChatCompletion_withCodexModel() {
+            String codexModel =
+                    System.getenv("OPENAI_CODEX_MODEL") != null
+                            ? System.getenv("OPENAI_CODEX_MODEL")
+                            : "codex-mini-latest";
+            ChatCompletion input = new ChatCompletion();
+            input.setModel(codexModel);
+            input.setMaxTokens(200);
+
+            var chatModel = openAI.getChatModel();
+            var options = openAI.getChatOptions(input);
+
+            Prompt prompt =
+                    new Prompt(
+                            List.of(new UserMessage("Write a hello world function in Python")),
+                            options);
+            var response = chatModel.call(prompt);
+
+            assertNotNull(response);
+            assertNotNull(response.getResult());
+            assertFalse(response.getResult().getOutput().getText().isEmpty());
+        }
+
+        @Test
+        void testChatCompletion_withWebSearch() {
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("gpt-4o-mini");
+            input.setMaxTokens(200);
+            input.setTemperature(0.0);
+            input.setWebSearch(true);
+
+            var chatModel = openAI.getChatModel();
+            var options = openAI.getChatOptions(input);
+
+            Prompt prompt =
+                    new Prompt(
+                            List.of(
+                                    new UserMessage(
+                                            "What is the current weather in San Francisco?")),
+                            options);
+            var response = chatModel.call(prompt);
+
+            assertNotNull(response);
+            assertNotNull(response.getResult());
             assertFalse(response.getResult().getOutput().getText().isEmpty());
         }
 

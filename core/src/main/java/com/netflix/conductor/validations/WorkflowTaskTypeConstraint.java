@@ -192,7 +192,10 @@ public @interface WorkflowTaskTypeConstraint {
         private void validateScriptExpression(
                 String expression, Map<String, Object> inputParameters) {
             try {
-                Object returnValue = ScriptEvaluator.eval(expression, inputParameters);
+                // Syntax check only: at registration time inputParameters still holds unresolved
+                // ${...} placeholders, so evaluating the expression would throw ReferenceError
+                // for any runtime-bound variable and reject valid definitions (issue #1311).
+                ScriptEvaluator.validateScriptSyntax(expression);
             } catch (Exception e) {
                 throw new IllegalArgumentException(
                         String.format("Expression is not well formatted: %s", e.getMessage()));
@@ -410,12 +413,21 @@ public @interface WorkflowTaskTypeConstraint {
             boolean valid = true;
             boolean isInputParameterSet = false;
             boolean isInputTemplateSet = false;
+            boolean isTopLevelInputSet = false;
 
             // Either http_request in WorkflowTask inputParam should be set or in inputTemplate
-            // Taskdef should be set
+            // Taskdef should be set, or the input parameters can be provided at the top level
+            // (e.g. uri, method directly in inputParameters)
             if (workflowTask.getInputParameters() != null
                     && workflowTask.getInputParameters().containsKey("http_request")) {
                 isInputParameterSet = true;
+            }
+
+            // Check if top-level HTTP parameters are provided (uri or method)
+            if (workflowTask.getInputParameters() != null
+                    && (workflowTask.getInputParameters().containsKey("uri")
+                            || workflowTask.getInputParameters().containsKey("method"))) {
+                isTopLevelInputSet = true;
             }
 
             TaskDef taskDef =
@@ -430,11 +442,11 @@ public @interface WorkflowTaskTypeConstraint {
                 isInputTemplateSet = true;
             }
 
-            if (!(isInputParameterSet || isInputTemplateSet)) {
+            if (!(isInputParameterSet || isInputTemplateSet || isTopLevelInputSet)) {
                 String message =
                         String.format(
                                 PARAM_REQUIRED_STRING_FORMAT,
-                                "inputParameters.http_request",
+                                "inputParameters.http_request or inputParameters.uri",
                                 TaskType.HTTP,
                                 workflowTask.getName());
                 context.buildConstraintViolationWithTemplate(message).addConstraintViolation();

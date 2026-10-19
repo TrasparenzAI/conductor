@@ -15,11 +15,11 @@ package com.netflix.conductor.sqlite.dao;
 import java.io.File;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.time.temporal.TemporalAccessor;
 import java.util.*;
+import java.util.stream.IntStream;
 
 import javax.sql.DataSource;
 
@@ -69,6 +69,11 @@ import static org.junit.Assert.assertEquals;
 @SpringBootTest
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_EACH_TEST_METHOD)
 public class SqliteIndexDAOTest {
+
+    // Canonical UTC text format the index columns are stored in (issue #1497). Byte-identical to
+    // SQLite's strftime('%Y-%m-%d %H:%M:%f', ...), independent of the JVM/host default zone.
+    private static final DateTimeFormatter SQLITE_UTC_TIMESTAMP =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
 
     @Autowired private SqliteIndexDAO indexDAO;
 
@@ -157,10 +162,11 @@ public class SqliteIndexDAOTest {
                 "Workflow type does not match",
                 wfs.getWorkflowType(),
                 result.get(0).get("workflow_type"));
-        TemporalAccessor ta = DateTimeFormatter.ISO_INSTANT.parse(wfs.getStartTime());
-        Timestamp startTime = Timestamp.from(Instant.from(ta));
+        Instant startInstant =
+                Instant.from(DateTimeFormatter.ISO_INSTANT.parse(wfs.getStartTime()));
+        String expectedStartTime = SQLITE_UTC_TIMESTAMP.format(startInstant);
         assertEquals(
-                "Start time does not match", startTime.toString(), result.get(0).get("start_time"));
+                "Start time does not match", expectedStartTime, result.get(0).get("start_time"));
         assertEquals(
                 "Status does not match", wfs.getStatus().toString(), result.get(0).get("status"));
     }
@@ -185,22 +191,68 @@ public class SqliteIndexDAOTest {
                 "Task def name does not match",
                 ts.getTaskDefName(),
                 result.get(0).get("task_def_name"));
-        TemporalAccessor startTa = DateTimeFormatter.ISO_INSTANT.parse(ts.getStartTime());
-        Timestamp startTime = Timestamp.from(Instant.from(startTa));
+        Instant startInstant = Instant.from(DateTimeFormatter.ISO_INSTANT.parse(ts.getStartTime()));
+        String expectedStartTime = SQLITE_UTC_TIMESTAMP.format(startInstant);
         assertEquals(
-                "Start time does not match", startTime.toString(), result.get(0).get("start_time"));
-        TemporalAccessor updateTa = DateTimeFormatter.ISO_INSTANT.parse(ts.getUpdateTime());
-        Timestamp updateTime = Timestamp.from(Instant.from(updateTa));
+                "Start time does not match", expectedStartTime, result.get(0).get("start_time"));
+        Instant updateInstant =
+                Instant.from(DateTimeFormatter.ISO_INSTANT.parse(ts.getUpdateTime()));
+        String expectedUpdateTime = SQLITE_UTC_TIMESTAMP.format(updateInstant);
         assertEquals(
-                "Update time does not match",
-                updateTime.toString(),
-                result.get(0).get("update_time"));
+                "Update time does not match", expectedUpdateTime, result.get(0).get("update_time"));
         assertEquals(
                 "Status does not match", ts.getStatus().toString(), result.get(0).get("status"));
         assertEquals(
                 "Workflow type does not match",
                 ts.getWorkflowType().toString(),
                 result.get(0).get("workflow_type"));
+    }
+
+    @Test
+    public void testIndexWorkflowStoresEndTimeOnceItIsSet() throws SQLException {
+        WorkflowSummary wfs = getMockWorkflowSummary("workflow-id-end-time");
+
+        // Still running: no end time on the summary, so the column holds the epoch sentinel
+        // rather than NULL, which is what keeps endTime ordering the same on SQLite and Postgres.
+        indexDAO.indexWorkflow(wfs);
+        assertEquals(
+                "Unfinished workflow should store the epoch",
+                SQLITE_UTC_TIMESTAMP.format(Instant.EPOCH),
+                queryEndTime("workflow_index", "workflow_id", "workflow-id-end-time"));
+
+        // Terminal: the end time must reach the column through the ON CONFLICT update path too,
+        // since the row already exists by the time the workflow finishes.
+        wfs.setEndTime("2023-02-07T08:44:45Z");
+        wfs.setUpdateTime("2023-02-07T08:44:45Z");
+        indexDAO.indexWorkflow(wfs);
+        assertEquals(
+                "End time does not match",
+                SQLITE_UTC_TIMESTAMP.format(
+                        Instant.from(DateTimeFormatter.ISO_INSTANT.parse(wfs.getEndTime()))),
+                queryEndTime("workflow_index", "workflow_id", "workflow-id-end-time"));
+    }
+
+    @Test
+    public void testIndexTaskStoresEndTime() throws SQLException {
+        TaskSummary ts = getMockTaskSummary("task-id-end-time");
+        ts.setEndTime("2023-02-07T09:43:45Z");
+
+        indexDAO.indexTask(ts);
+
+        assertEquals(
+                "End time does not match",
+                SQLITE_UTC_TIMESTAMP.format(
+                        Instant.from(DateTimeFormatter.ISO_INSTANT.parse(ts.getEndTime()))),
+                queryEndTime("task_index", "task_id", "task-id-end-time"));
+    }
+
+    private Object queryEndTime(String table, String idColumn, String id) throws SQLException {
+        List<Map<String, Object>> result =
+                queryDb(
+                        String.format(
+                                "SELECT end_time FROM %s WHERE %s = '%s'", table, idColumn, id));
+        assertEquals("Wrong number of rows returned", 1, result.size());
+        return result.get(0).get("end_time");
     }
 
     @Test
@@ -349,6 +401,62 @@ public class SqliteIndexDAOTest {
         assertEquals(1675845987000L, records.get(1).get("created_time"));
     }
 
+    // Asserts the rows actually come back ordered, not just that the SQL contains an ORDER BY.
+    // Workflows are indexed in an order that is deliberately NOT end-time order, so a dropped
+    // ORDER BY would surface as insertion order and fail here.
+    @Test
+    public void testSearchWorkflowSummarySortsByEndTime() {
+        indexEndTimeFixture("wf-end-mid", "2023-02-07T10:00:00Z");
+        indexEndTimeFixture("wf-end-late", "2023-02-07T12:00:00Z");
+        indexEndTimeFixture("wf-end-running", null);
+        indexEndTimeFixture("wf-end-early", "2023-02-07T08:00:00Z");
+
+        assertEquals(
+                "Descending end time order is wrong",
+                List.of("wf-end-late", "wf-end-mid", "wf-end-early", "wf-end-running"),
+                searchEndTimeFixture("endTime:DESC"));
+
+        // The unfinished workflow carries the epoch, so it leads on ascending rather than
+        // landing wherever the engine happens to place NULLs.
+        assertEquals(
+                "Ascending end time order is wrong",
+                List.of("wf-end-running", "wf-end-early", "wf-end-mid", "wf-end-late"),
+                searchEndTimeFixture("endTime:ASC"));
+    }
+
+    @Test
+    public void testSearchWorkflowSummaryFiltersByEndTimeRange() {
+        indexEndTimeFixture("wf-range-early", "2023-02-07T08:00:00Z");
+        indexEndTimeFixture("wf-range-late", "2023-02-07T12:00:00Z");
+
+        // 2023-02-07T10:00:00Z. Only the later workflow finished after this instant; the earlier
+        // one must be excluded rather than the filter being dropped and both returned.
+        String query = "workflowType=\"end-time-range\" AND endTime>1675764000000";
+        SearchResult<WorkflowSummary> results =
+                indexDAO.searchWorkflowSummary(query, "*", 0, 15, List.of("endTime:DESC"));
+
+        assertEquals(
+                "End time range filter was not applied",
+                List.of("wf-range-late"),
+                results.getResults().stream().map(WorkflowSummary::getWorkflowId).toList());
+    }
+
+    private void indexEndTimeFixture(String id, String endTime) {
+        WorkflowSummary wfs = getMockWorkflowSummary(id);
+        wfs.setWorkflowType(id.startsWith("wf-range") ? "end-time-range" : "end-time-order");
+        wfs.setEndTime(endTime);
+        indexDAO.indexWorkflow(wfs);
+    }
+
+    private List<String> searchEndTimeFixture(String sort) {
+        return indexDAO
+                .searchWorkflowSummary("workflowType=\"end-time-order\"", "*", 0, 15, List.of(sort))
+                .getResults()
+                .stream()
+                .map(WorkflowSummary::getWorkflowId)
+                .toList();
+    }
+
     @Test
     public void testSearchWorkflowSummary() {
         WorkflowSummary wfs = getMockWorkflowSummary("workflow-id");
@@ -363,6 +471,98 @@ public class SqliteIndexDAOTest {
                 "Wrong workflow returned",
                 wfs.getWorkflowId(),
                 results.getResults().get(0).getWorkflowId());
+    }
+
+    // Issue #1497 regression: on a negative-UTC-offset host, start_time was written in the JVM's
+    // default zone but the search bound was rendered in UTC. A workflow started "now" was
+    // therefore invisible to a search bound anchored an hour in the past. This test only proves
+    // anything when the JVM zone differs from UTC, hence the TZ env set on the `test` task in
+    // sqlite-persistence/build.gradle.
+    @Test
+    public void searchesFindWorkflowsIndexedInANonUtcZone() {
+        WorkflowSummary wfs = getMockWorkflowSummary("workflow-id-non-utc-zone");
+        Instant now = Instant.now();
+        wfs.setStartTime(DateTimeFormatter.ISO_INSTANT.format(now));
+        wfs.setUpdateTime(DateTimeFormatter.ISO_INSTANT.format(now));
+
+        indexDAO.indexWorkflow(wfs);
+
+        long oneHourAgoMillis = now.minusSeconds(3600).toEpochMilli();
+        String query = String.format("startTime>%d", oneHourAgoMillis);
+        SearchResult<WorkflowSummary> results =
+                indexDAO.searchWorkflowSummary(query, "*", 0, 15, new ArrayList<>());
+        assertEquals(
+                "Workflow indexed 'now' should be found by a search bound one hour in the past",
+                1,
+                results.getResults().size());
+    }
+
+    // Issue #1497 regression, task-side. See searchesFindWorkflowsIndexedInANonUtcZone above.
+    @Test
+    public void searchesFindTasksIndexedInANonUtcZone() {
+        TaskSummary ts = getMockTaskSummary("task-id-non-utc-zone");
+        Instant now = Instant.now();
+        ts.setStartTime(DateTimeFormatter.ISO_INSTANT.format(now));
+        ts.setUpdateTime(DateTimeFormatter.ISO_INSTANT.format(now));
+
+        indexDAO.indexTask(ts);
+
+        long oneHourAgoMillis = now.minusSeconds(3600).toEpochMilli();
+        String query = String.format("startTime>%d", oneHourAgoMillis);
+        SearchResult<TaskSummary> results =
+                indexDAO.searchTaskSummary(query, "*", 0, 15, new ArrayList<>());
+        assertEquals(
+                "Task indexed 'now' should be found by a search bound one hour in the past",
+                1,
+                results.getResults().size());
+    }
+
+    @Test
+    public void testSearchWorkflowSummaryByClassifier() {
+        String correlationId = "classifier-search-correlation-id";
+
+        WorkflowSummary agentWfs = getMockWorkflowSummary("workflow-id-classifier-agent");
+        agentWfs.setCorrelationId(correlationId);
+        agentWfs.setClassifier("agent");
+        indexDAO.indexWorkflow(agentWfs);
+
+        WorkflowSummary plainWfs = getMockWorkflowSummary("workflow-id-classifier-plain");
+        plainWfs.setCorrelationId(correlationId);
+        plainWfs.setClassifier("workflow");
+        indexDAO.indexWorkflow(plainWfs);
+
+        // Simulates a row indexed before the classifier column existed (NULL classifier).
+        WorkflowSummary legacyWfs = getMockWorkflowSummary("workflow-id-classifier-legacy");
+        legacyWfs.setCorrelationId(correlationId);
+        indexDAO.indexWorkflow(legacyWfs);
+
+        String agentQuery =
+                String.format("correlationId='%s' AND classifier='agent'", correlationId);
+        SearchResult<WorkflowSummary> agentResults =
+                indexDAO.searchWorkflowSummary(agentQuery, "*", 0, 15, new ArrayList<>());
+        assertEquals("Wrong number of agent results", 1, agentResults.getResults().size());
+        assertEquals(
+                "Wrong workflow returned",
+                agentWfs.getWorkflowId(),
+                agentResults.getResults().get(0).getWorkflowId());
+
+        // The untagged token must match both explicitly tagged plain workflows and legacy
+        // NULL rows.
+        String workflowQuery =
+                String.format("correlationId='%s' AND classifier='workflow'", correlationId);
+        SearchResult<WorkflowSummary> workflowResults =
+                indexDAO.searchWorkflowSummary(workflowQuery, "*", 0, 15, new ArrayList<>());
+        assertEquals("Wrong number of untagged results", 2, workflowResults.getResults().size());
+
+        String inQuery =
+                String.format("correlationId='%s' AND classifier IN (agent,other)", correlationId);
+        SearchResult<WorkflowSummary> inResults =
+                indexDAO.searchWorkflowSummary(inQuery, "*", 0, 15, new ArrayList<>());
+        assertEquals("Wrong number of IN clause results", 1, inResults.getResults().size());
+
+        indexDAO.removeWorkflow(agentWfs.getWorkflowId());
+        indexDAO.removeWorkflow(plainWfs.getWorkflowId());
+        indexDAO.removeWorkflow(legacyWfs.getWorkflowId());
     }
 
     @Test
@@ -445,6 +645,135 @@ public class SqliteIndexDAOTest {
                 "Results returned in wrong order",
                 "workflow-id-pagination-0",
                 results.getResults().get(0).getWorkflowId());
+    }
+
+    @Test
+    public void testSearchWorkflows() {
+        WorkflowSummary wfs = getMockWorkflowSummary("workflow-id-v2");
+
+        indexDAO.indexWorkflow(wfs);
+
+        String query = String.format("workflowId=\"%s\"", wfs.getWorkflowId());
+        SearchResult<String> results =
+                indexDAO.searchWorkflows(query, "*", 0, 15, new ArrayList<>());
+        assertEquals("No results returned", 1, results.getResults().size());
+        assertEquals(
+                "Wrong workflow id returned", wfs.getWorkflowId(), results.getResults().get(0));
+    }
+
+    @Test
+    public void testSearchWorkflowsPagination() {
+        for (int i = 0; i < 5; i++) {
+            WorkflowSummary wfs = getMockWorkflowSummary("wf-v2-pagination-" + i);
+            indexDAO.indexWorkflow(wfs);
+        }
+
+        List<String> orderBy = Arrays.asList(new String[] {"workflowId:DESC"});
+        SearchResult<String> results = indexDAO.searchWorkflows("", "*", 0, 2, orderBy);
+        assertEquals("Wrong totalHits returned", 5, results.getTotalHits());
+        assertEquals("Wrong number of results returned", 2, results.getResults().size());
+        assertEquals(
+                "Results returned in wrong order",
+                "wf-v2-pagination-4",
+                results.getResults().get(0));
+        assertEquals(
+                "Results returned in wrong order",
+                "wf-v2-pagination-3",
+                results.getResults().get(1));
+    }
+
+    @Test
+    public void testSearchWorkflowsWithNullSort() {
+        WorkflowSummary wfs = getMockWorkflowSummary("workflow-id-null-sort");
+
+        indexDAO.indexWorkflow(wfs);
+
+        String query = String.format("workflowId=\"%s\"", wfs.getWorkflowId());
+        SearchResult<String> results = indexDAO.searchWorkflows(query, "*", 0, 15, null);
+        assertEquals("No results returned", 1, results.getResults().size());
+        assertEquals(
+                "Wrong workflow id returned", wfs.getWorkflowId(), results.getResults().get(0));
+    }
+
+    @Test
+    public void testSearchWorkflowSummaryWithSingleQuotes() {
+        WorkflowSummary wfs = getMockWorkflowSummary("workflow-id-single-quote");
+
+        indexDAO.indexWorkflow(wfs);
+
+        String query = String.format("workflowId='%s'", wfs.getWorkflowId());
+        SearchResult<WorkflowSummary> results =
+                indexDAO.searchWorkflowSummary(query, "*", 0, 15, new ArrayList<>());
+        assertEquals("No results returned", 1, results.getResults().size());
+        assertEquals(
+                "Wrong workflow returned",
+                wfs.getWorkflowId(),
+                results.getResults().get(0).getWorkflowId());
+    }
+
+    @Test
+    public void testSearchWorkflowsWithSingleQuotes() {
+        WorkflowSummary wfs = getMockWorkflowSummary("workflow-id-v2-single-quote");
+
+        indexDAO.indexWorkflow(wfs);
+
+        String query = String.format("workflowId='%s'", wfs.getWorkflowId());
+        SearchResult<String> results =
+                indexDAO.searchWorkflows(query, "*", 0, 15, new ArrayList<>());
+        assertEquals("No results returned", 1, results.getResults().size());
+        assertEquals(
+                "Wrong workflow id returned", wfs.getWorkflowId(), results.getResults().get(0));
+    }
+
+    @Test
+    public void testSearchWorkflowsWithSingleQuotedMultiCondition() {
+        WorkflowSummary wfs = getMockWorkflowSummary("workflow-id-multi-cond");
+        wfs.setCorrelationId("test-correlation-id");
+
+        indexDAO.indexWorkflow(wfs);
+
+        String query =
+                String.format(
+                        "correlationId='%s' AND workflowType='%s'",
+                        wfs.getCorrelationId(), wfs.getWorkflowType());
+        SearchResult<String> results =
+                indexDAO.searchWorkflows(query, "*", 0, 15, new ArrayList<>());
+        assertEquals("No results returned", 1, results.getResults().size());
+        assertEquals(
+                "Wrong workflow id returned", wfs.getWorkflowId(), results.getResults().get(0));
+    }
+
+    @Test
+    public void testSearchTasks() {
+        TaskSummary ts = getMockTaskSummary("task-id-v2");
+
+        indexDAO.indexTask(ts);
+
+        String query = String.format("taskId=\"%s\"", ts.getTaskId());
+        SearchResult<String> results = indexDAO.searchTasks(query, "*", 0, 15, new ArrayList<>());
+        assertEquals("No results returned", 1, results.getResults().size());
+        assertEquals("Wrong task id returned", ts.getTaskId(), results.getResults().get(0));
+    }
+
+    @Test
+    public void testSearchTasksPagination() {
+        for (int i = 0; i < 5; i++) {
+            TaskSummary ts = getMockTaskSummary("task-v2-pagination-" + i);
+            indexDAO.indexTask(ts);
+        }
+
+        List<String> orderBy = Arrays.asList(new String[] {"taskId:DESC"});
+        SearchResult<String> results = indexDAO.searchTasks("", "*", 0, 2, orderBy);
+        assertEquals("Wrong totalHits returned", 5, results.getTotalHits());
+        assertEquals("Wrong number of results returned", 2, results.getResults().size());
+        assertEquals(
+                "Results returned in wrong order",
+                "task-v2-pagination-4",
+                results.getResults().get(0));
+        assertEquals(
+                "Results returned in wrong order",
+                "task-v2-pagination-3",
+                results.getResults().get(1));
     }
 
     @Test
@@ -567,5 +896,161 @@ public class SqliteIndexDAOTest {
 
         log_records = queryDb("SELECT * FROM task_execution_logs WHERE task_id = '" + taskId + "'");
         assertEquals("Task execution logs were not deleted", 0, log_records.size());
+    }
+
+    private WorkflowSummary getMockWorkflowSummary(String id, String parentWorkflowId) {
+        WorkflowSummary wfs = getMockWorkflowSummary(id);
+        wfs.setParentWorkflowId(parentWorkflowId);
+        return wfs;
+    }
+
+    @Test
+    public void testWildcardSearchWorkflowSummaryByType() {
+        WorkflowSummary wfs1 = getMockWorkflowSummary("wf-wildcard-1");
+        wfs1.setWorkflowType("order_processing_v1");
+        indexDAO.indexWorkflow(wfs1);
+
+        WorkflowSummary wfs2 = getMockWorkflowSummary("wf-wildcard-2");
+        wfs2.setWorkflowType("order_processing_v2");
+        indexDAO.indexWorkflow(wfs2);
+
+        WorkflowSummary wfs3 = getMockWorkflowSummary("wf-wildcard-3");
+        wfs3.setWorkflowType("payment_processing_v1");
+        indexDAO.indexWorkflow(wfs3);
+
+        String query = "workflowType=order_processing*";
+        SearchResult<WorkflowSummary> results =
+                indexDAO.searchWorkflowSummary(query, "*", 0, 15, new ArrayList<>());
+        assertEquals("Should find 2 order_processing workflows", 2, results.getResults().size());
+
+        query = "workflowType=*processing*";
+        results = indexDAO.searchWorkflowSummary(query, "*", 0, 15, new ArrayList<>());
+        assertEquals("Should find 3 processing workflows", 3, results.getResults().size());
+    }
+
+    @Test
+    public void testWildcardSearchNoMatches() {
+        WorkflowSummary wfs = getMockWorkflowSummary("wf-wildcard-nomatch");
+        wfs.setWorkflowType("order_processing_v1");
+        indexDAO.indexWorkflow(wfs);
+
+        String query = "workflowType=payment*";
+        SearchResult<WorkflowSummary> results =
+                indexDAO.searchWorkflowSummary(query, "*", 0, 15, new ArrayList<>());
+        assertEquals("Should find 0 workflows", 0, results.getResults().size());
+    }
+
+    @Test
+    public void testSearchExcludeSubWorkflows() {
+        WorkflowSummary topLevel1 = getMockWorkflowSummary("wf-top-1", "");
+        indexDAO.indexWorkflow(topLevel1);
+
+        WorkflowSummary topLevel2 = getMockWorkflowSummary("wf-top-2", "");
+        indexDAO.indexWorkflow(topLevel2);
+
+        WorkflowSummary subWf1 = getMockWorkflowSummary("wf-sub-1", "wf-top-1");
+        indexDAO.indexWorkflow(subWf1);
+
+        WorkflowSummary subWf2 = getMockWorkflowSummary("wf-sub-2", "wf-top-1");
+        indexDAO.indexWorkflow(subWf2);
+
+        String query = "parentWorkflowId=\"\"";
+        SearchResult<WorkflowSummary> results =
+                indexDAO.searchWorkflowSummary(query, "*", 0, 15, new ArrayList<>());
+        assertEquals("Should find only 2 top-level workflows", 2, results.getResults().size());
+    }
+
+    @Test
+    public void testSearchSubWorkflowsOfParent() {
+        WorkflowSummary topLevel = getMockWorkflowSummary("wf-parent-1", "");
+        indexDAO.indexWorkflow(topLevel);
+
+        WorkflowSummary subWf1 = getMockWorkflowSummary("wf-child-1", "wf-parent-1");
+        indexDAO.indexWorkflow(subWf1);
+
+        WorkflowSummary subWf2 = getMockWorkflowSummary("wf-child-2", "wf-parent-1");
+        indexDAO.indexWorkflow(subWf2);
+
+        WorkflowSummary subWf3 = getMockWorkflowSummary("wf-child-3", "wf-parent-other");
+        indexDAO.indexWorkflow(subWf3);
+
+        String query = "parentWorkflowId=\"wf-parent-1\"";
+        SearchResult<WorkflowSummary> results =
+                indexDAO.searchWorkflowSummary(query, "*", 0, 15, new ArrayList<>());
+        assertEquals("Should find 2 child workflows", 2, results.getResults().size());
+    }
+
+    @Test
+    public void testAgentHierarchySortPlacesChildImmediatelyAfterParent() {
+        WorkflowSummary child = getMockWorkflowSummary("agent-child", "agent-parent");
+        child.setClassifier("agent");
+        indexDAO.indexWorkflow(child);
+
+        WorkflowSummary grandchild = getMockWorkflowSummary("agent-grandchild", "agent-child");
+        grandchild.setClassifier("agent");
+        indexDAO.indexWorkflow(grandchild);
+
+        WorkflowSummary unrelated = getMockWorkflowSummary("agent-unrelated", "");
+        unrelated.setClassifier("agent");
+        indexDAO.indexWorkflow(unrelated);
+
+        WorkflowSummary parent = getMockWorkflowSummary("agent-parent", "");
+        parent.setClassifier("agent");
+        indexDAO.indexWorkflow(parent);
+
+        SearchResult<WorkflowSummary> results =
+                indexDAO.searchWorkflowSummary(
+                        "classifier=agent",
+                        "*",
+                        0,
+                        15,
+                        Arrays.asList("agentHierarchy:DESC", "startTime:DESC"));
+
+        int parentIndex =
+                IntStream.range(0, results.getResults().size())
+                        .filter(
+                                i ->
+                                        "agent-parent"
+                                                .equals(
+                                                        results.getResults()
+                                                                .get(i)
+                                                                .getWorkflowId()))
+                        .findFirst()
+                        .orElseThrow();
+        assertEquals("agent-child", results.getResults().get(parentIndex + 1).getWorkflowId());
+        assertEquals("agent-grandchild", results.getResults().get(parentIndex + 2).getWorkflowId());
+    }
+
+    @Test
+    public void testSearchSubWorkflowsWrongParentReturnsEmpty() {
+        WorkflowSummary subWf1 = getMockWorkflowSummary("wf-orphan-1", "wf-parent-1");
+        indexDAO.indexWorkflow(subWf1);
+
+        String query = "parentWorkflowId=\"wf-nonexistent-parent\"";
+        SearchResult<WorkflowSummary> results =
+                indexDAO.searchWorkflowSummary(query, "*", 0, 15, new ArrayList<>());
+        assertEquals(
+                "Should find 0 workflows for nonexistent parent", 0, results.getResults().size());
+    }
+
+    @Test
+    public void testWildcardWithParentWorkflowIdFilter() {
+        WorkflowSummary topOrder = getMockWorkflowSummary("wf-combined-1", "");
+        topOrder.setWorkflowType("order_processing_v1");
+        indexDAO.indexWorkflow(topOrder);
+
+        WorkflowSummary topPayment = getMockWorkflowSummary("wf-combined-2", "");
+        topPayment.setWorkflowType("payment_processing_v1");
+        indexDAO.indexWorkflow(topPayment);
+
+        WorkflowSummary subOrder = getMockWorkflowSummary("wf-combined-3", "wf-combined-1");
+        subOrder.setWorkflowType("order_processing_v1");
+        indexDAO.indexWorkflow(subOrder);
+
+        String query = "parentWorkflowId=\"\" AND workflowType=order*";
+        SearchResult<WorkflowSummary> results =
+                indexDAO.searchWorkflowSummary(query, "*", 0, 15, new ArrayList<>());
+        assertEquals("Should find 1 top-level order workflow", 1, results.getResults().size());
+        assertEquals("wf-combined-1", results.getResults().get(0).getWorkflowId());
     }
 }

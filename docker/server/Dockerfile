@@ -1,57 +1,62 @@
 #
-# conductor:server - Build Conductor Server
+# conductor:server - Conductor Server + UI
 #
+# Build args:
+#   PREBUILT=true:  Skips both JAR and UI builds, uses pre-built artifacts (CI multi-arch)
+#   SKIP_UI=true:   Skips only the UI build (E2E CI — tests serve UI from the host)
+#   Default:        Builds JAR and UI from source (docker-compose, local dev)
+#
+
 # ===========================================================================================================
-# 0. Builder stage 1
+# 0. Builder stage
 # ===========================================================================================================
 FROM azul/zulu-openjdk-debian:21 AS builder
 
+ARG PREBUILT=false
 ARG INDEXING_BACKEND=elasticsearch
 
 LABEL maintainer="Orkes OSS <oss@orkes.io>"
 
-# Copy the project directly onto the image
 COPY . /conductor
 WORKDIR /conductor
 
-# Build the server on run
-RUN ./gradlew build -x test -x spotlessCheck -x shadowJar -x :conductor-os-persistence-v3:build -PindexingBackend=${INDEXING_BACKEND}
-WORKDIR /server/build/libs
-RUN ls -ltr
+RUN if [ "$PREBUILT" = "true" ]; then \
+      rm -rf server/build/libs && mkdir -p server/build/libs && \
+      cp docker/server/libs/conductor-server.jar server/build/libs/conductor-server-boot.jar && \
+      echo "Using pre-built server JAR"; \
+    else \
+      ./gradlew build -x test -x spotlessCheck -x shadowJar \
+        -PindexingBackend=${INDEXING_BACKEND} \
+        -Dorg.gradle.jvmargs=-Xmx2g \
+        --no-daemon --no-parallel; \
+    fi
 
 
-#
-# conductor:server - Build Conductor UI
-#
 # ===========================================================================================================
-# 1. Builder stage 2
+# 1. UI builder stage
 # ===========================================================================================================
 FROM node:lts AS ui-builder
-ARG YARN_OPTS
+
+ARG PREBUILT=false
+ARG SKIP_UI=false
 
 LABEL maintainer="Orkes OSS <oss@orkes.io>"
 
-# Install dependencies
-RUN corepack enable && corepack prepare yarn@stable --activate
+COPY ui-next /conductor/ui-next
+WORKDIR /conductor/ui-next
 
-COPY . /conductor
-WORKDIR /conductor/ui
-
-# Include monaco sources into bundle (instead of using CDN)
-ENV REACT_APP_MONACO_EDITOR_USING_CDN=false
-ENV REACT_APP_ENABLE_ERRORS_INSPECTOR=true
-RUN yarn config set network-timeout 600000 -g
-RUN yarn ${YARN_OPTS} install && cp -r node_modules/monaco-editor public/ && yarn ${YARN_OPTS} build
-RUN ls -ltr
-RUN echo "Done building UI"
-
-RUN echo "Copying UI to server"
-WORKDIR /conductor
-RUN rm -rf server/src/main/resources/static
-RUN cp -R ui/build/ server/src/main/resources/static
+RUN if [ "$SKIP_UI" = "true" ]; then \
+      mkdir -p dist && echo "UI build skipped (SKIP_UI=true)"; \
+    elif [ "$PREBUILT" = "false" ]; then \
+      corepack enable && \
+      pnpm install && \
+      NODE_OPTIONS=--max-old-space-size=4096 pnpm build; \
+    else \
+      echo "Using pre-built UI assets"; \
+    fi
 
 # ===========================================================================================================
-# 2. Bin stage
+# 2. Final stage
 # ===========================================================================================================
 FROM debian:stable-slim
 
@@ -73,8 +78,8 @@ COPY --from=builder /conductor/server/build/libs/*boot*.jar /app/libs/conductor-
 # Copy compiled UI assets to nginx www directory
 WORKDIR /usr/share/nginx/html
 RUN rm -rf ./*
-COPY --from=ui-builder /conductor/ui/build .
-COPY --from=ui-builder /conductor/docker/server/nginx/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=ui-builder /conductor/ui-next/dist .
+COPY docker/server/nginx/nginx.conf  /etc/nginx/conf.d/default.conf
 
 # Copy the files for the server into the app folders
 RUN chmod +x /app/startup.sh

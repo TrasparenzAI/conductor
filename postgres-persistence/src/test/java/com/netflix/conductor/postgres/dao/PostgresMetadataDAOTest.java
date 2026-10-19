@@ -38,7 +38,9 @@ import com.netflix.conductor.common.config.TestObjectMapperConfiguration;
 import com.netflix.conductor.common.metadata.events.EventHandler;
 import com.netflix.conductor.common.metadata.tasks.TaskDef;
 import com.netflix.conductor.common.metadata.workflow.WorkflowDef;
-import com.netflix.conductor.core.exception.NonTransientException;
+import com.netflix.conductor.common.metadata.workflow.WorkflowDefSummary;
+import com.netflix.conductor.core.exception.ConflictException;
+import com.netflix.conductor.core.exception.NotFoundException;
 import com.netflix.conductor.postgres.config.PostgresConfiguration;
 
 import static org.junit.Assert.assertEquals;
@@ -77,18 +79,17 @@ public class PostgresMetadataDAOTest {
 
         metadataDAO.createWorkflowDef(def);
 
-        NonTransientException applicationException =
-                assertThrows(NonTransientException.class, () -> metadataDAO.createWorkflowDef(def));
+        ConflictException applicationException =
+                assertThrows(ConflictException.class, () -> metadataDAO.createWorkflowDef(def));
         assertEquals(
                 "Workflow with testDuplicate.1 already exists!", applicationException.getMessage());
     }
 
     @Test
     public void testRemoveNotExistingWorkflowDef() {
-        NonTransientException applicationException =
+        NotFoundException applicationException =
                 assertThrows(
-                        NonTransientException.class,
-                        () -> metadataDAO.removeWorkflowDef("test", 1));
+                        NotFoundException.class, () -> metadataDAO.removeWorkflowDef("test", 1));
         assertEquals(
                 "No such workflow definition: test version: 1", applicationException.getMessage());
     }
@@ -233,9 +234,9 @@ public class PostgresMetadataDAOTest {
 
     @Test
     public void testRemoveNotExistingTaskDef() {
-        NonTransientException applicationException =
+        NotFoundException applicationException =
                 assertThrows(
-                        NonTransientException.class,
+                        NotFoundException.class,
                         () -> metadataDAO.removeTaskDef("test" + UUID.randomUUID().toString()));
         assertEquals("No such task definition", applicationException.getMessage());
     }
@@ -256,6 +257,13 @@ public class PostgresMetadataDAOTest {
         eventHandler.setEvent(event1);
 
         metadataDAO.addEventHandler(eventHandler);
+        ConflictException conflictException =
+                assertThrows(
+                        ConflictException.class, () -> metadataDAO.addEventHandler(eventHandler));
+        assertEquals(
+                "EventHandler with name " + eventHandler.getName() + " already exists!",
+                conflictException.getMessage());
+
         List<EventHandler> all = metadataDAO.getAllEventHandlers();
         assertNotNull(all);
         assertEquals(1, all.size());
@@ -281,6 +289,29 @@ public class PostgresMetadataDAOTest {
         byEvents = metadataDAO.getEventHandlersForEvent(event2, true);
         assertNotNull(byEvents);
         assertEquals(1, byEvents.size());
+    }
+
+    @Test
+    public void testMissingEventHandlerOperations() {
+        EventHandler eventHandler = new EventHandler();
+        eventHandler.setName(UUID.randomUUID().toString());
+        eventHandler.setEvent("SQS::arn:account090:missing");
+
+        NotFoundException updateException =
+                assertThrows(
+                        NotFoundException.class,
+                        () -> metadataDAO.updateEventHandler(eventHandler));
+        assertEquals(
+                "EventHandler with name " + eventHandler.getName() + " not found!",
+                updateException.getMessage());
+
+        NotFoundException removeException =
+                assertThrows(
+                        NotFoundException.class,
+                        () -> metadataDAO.removeEventHandler(eventHandler.getName()));
+        assertEquals(
+                "EventHandler with name " + eventHandler.getName() + " not found!",
+                removeException.getMessage());
     }
 
     @Test
@@ -316,9 +347,64 @@ public class PostgresMetadataDAOTest {
                         .collect(Collectors.toMap(WorkflowDef::getName, Function.identity()));
 
         assertNotNull(allMap);
-        assertEquals(4, allMap.size());
+        assertTrue(allMap.size() >= 4);
         assertEquals(1, allMap.get("test1").getVersion());
         assertEquals(2, allMap.get("test2").getVersion());
         assertEquals(3, allMap.get("test3").getVersion());
+    }
+
+    @Test
+    public void testGetWorkflowNames() {
+        WorkflowDef def = new WorkflowDef();
+        def.setName("names_wf_alpha");
+        def.setVersion(1);
+        metadataDAO.createWorkflowDef(def);
+
+        def.setVersion(2);
+        metadataDAO.createWorkflowDef(def);
+
+        def.setName("names_wf_beta");
+        def.setVersion(1);
+        metadataDAO.createWorkflowDef(def);
+
+        List<String> names = metadataDAO.getWorkflowNames();
+        assertNotNull(names);
+
+        // Verify distinct names and ordering
+        assertTrue(names.contains("names_wf_alpha"));
+        assertTrue(names.contains("names_wf_beta"));
+        assertTrue(names.indexOf("names_wf_alpha") < names.indexOf("names_wf_beta"));
+    }
+
+    @Test
+    public void testGetWorkflowVersions() {
+        WorkflowDef def = new WorkflowDef();
+        def.setName("versions_wf_test");
+        def.setVersion(1);
+        metadataDAO.createWorkflowDef(def);
+
+        def.setVersion(2);
+        metadataDAO.createWorkflowDef(def);
+
+        def.setVersion(5);
+        metadataDAO.createWorkflowDef(def);
+
+        List<WorkflowDefSummary> versions = metadataDAO.getWorkflowVersions("versions_wf_test");
+        assertNotNull(versions);
+        assertEquals(3, versions.size());
+
+        assertEquals(1, versions.get(0).getVersion());
+        assertEquals(2, versions.get(1).getVersion());
+        assertEquals(5, versions.get(2).getVersion());
+
+        for (WorkflowDefSummary summary : versions) {
+            assertEquals("versions_wf_test", summary.getName());
+            assertNotNull(summary.getCreateTime());
+        }
+
+        // Non-existent workflow should return empty list
+        List<WorkflowDefSummary> empty = metadataDAO.getWorkflowVersions("nonexistent_workflow");
+        assertNotNull(empty);
+        assertTrue(empty.isEmpty());
     }
 }

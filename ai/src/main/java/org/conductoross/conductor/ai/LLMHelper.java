@@ -21,24 +21,25 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
+import java.util.UUID;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.StringUtils;
 import org.conductoross.conductor.ai.document.DocumentLoader;
-import org.conductoross.conductor.ai.models.AudioGenRequest;
-import org.conductoross.conductor.ai.models.ChatCompletion;
-import org.conductoross.conductor.ai.models.ChatMessage;
-import org.conductoross.conductor.ai.models.EmbeddingGenRequest;
-import org.conductoross.conductor.ai.models.ImageGenRequest;
-import org.conductoross.conductor.ai.models.LLMResponse;
-import org.conductoross.conductor.ai.models.ToolCall;
-import org.conductoross.conductor.ai.models.ToolSpec;
-import org.conductoross.conductor.ai.models.VideoGenRequest;
-import org.conductoross.conductor.common.JsonSchemaValidator;
+import org.conductoross.conductor.ai.http.AIHttpClients;
+import org.conductoross.conductor.ai.model.AudioGenRequest;
+import org.conductoross.conductor.ai.model.ChatCompletion;
+import org.conductoross.conductor.ai.model.ChatMessage;
+import org.conductoross.conductor.ai.model.EmbeddingGenRequest;
+import org.conductoross.conductor.ai.model.ImageGenRequest;
+import org.conductoross.conductor.ai.model.LLMResponse;
+import org.conductoross.conductor.ai.model.ToolCall;
+import org.conductoross.conductor.ai.model.ToolSpec;
+import org.conductoross.conductor.ai.model.VideoGenRequest;
+import org.conductoross.conductor.ai.recording.LLMCallRecorder;
 import org.conductoross.conductor.common.utils.StringTemplate;
-import org.conductoross.conductor.config.AIIntegrationEnabledCondition;
+import org.conductoross.conductor.core.exception.SchemaValidationException;
+import org.conductoross.conductor.service.SchemaService;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -57,20 +58,16 @@ import org.springframework.ai.image.ImageModel;
 import org.springframework.ai.image.ImageOptions;
 import org.springframework.ai.image.ImagePrompt;
 import org.springframework.ai.image.ImageResponse;
-import org.springframework.context.annotation.Conditional;
-import org.springframework.stereotype.Component;
 import org.springframework.util.MimeType;
 
 import com.netflix.conductor.common.config.ObjectMapperProvider;
 import com.netflix.conductor.common.metadata.SchemaDef;
+import com.netflix.conductor.common.metadata.tasks.Task;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
-import com.networknt.schema.JsonSchemaException;
-import com.networknt.schema.ValidationMessage;
-import lombok.RequiredArgsConstructor;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.OkHttpClient;
@@ -83,10 +80,7 @@ import static com.netflix.conductor.common.metadata.tasks.TaskType.TASK_TYPE_SIM
 import static org.conductoross.conductor.ai.MimeExtensionResolver.getExtension;
 import static org.conductoross.conductor.ai.MimeExtensionResolver.getMimeTypeFromUrl;
 
-@Component
 @Slf4j
-@RequiredArgsConstructor
-@Conditional(AIIntegrationEnabledCondition.class)
 public class LLMHelper {
     private static final TypeReference<Map<String, Object>> MAP_OF_STRING_TO_OBJ =
             new TypeReference<>() {};
@@ -94,16 +88,44 @@ public class LLMHelper {
             Map.of("end_turn", "STOP", "tool_use", "TOOL_CALLS", "refusal", "CONTENT_FILTER");
     private final ObjectMapper objectMapper = new ObjectMapperProvider().getObjectMapper();
 
-    private final JsonSchemaValidator jsonSchemaValidator;
+    private final SchemaService schemaService;
     private final List<DocumentLoader> documentLoaders;
+    private final OkHttpClient httpClient;
+    private final LLMCallRecorder recorder;
+
+    public LLMHelper(SchemaService schemaService, List<DocumentLoader> documentLoaders) {
+        this(schemaService, documentLoaders, AIHttpClients.defaultClient());
+    }
+
+    public LLMHelper(
+            SchemaService schemaService,
+            List<DocumentLoader> documentLoaders,
+            OkHttpClient httpClient) {
+        this(schemaService, documentLoaders, httpClient, null);
+    }
+
+    public LLMHelper(
+            SchemaService schemaService,
+            List<DocumentLoader> documentLoaders,
+            OkHttpClient httpClient,
+            LLMCallRecorder recorder) {
+        this.schemaService = schemaService;
+        this.documentLoaders = documentLoaders;
+        this.httpClient = httpClient;
+        this.recorder = recorder;
+    }
 
     public LLMResponse chatComplete(
+            Task task,
             AIModel llm,
             ChatCompletion chatCompletion,
             String payloadStoreLocation,
             Consumer<TokenUsageLog> tokenUsageLogger) {
 
-        ChatModel chatModel = llm.getChatModel();
+        ChatModel chatModel = llm.getChatModel(chatCompletion);
+        if (recorder != null) {
+            chatModel = recorder.wrap(llm, chatCompletion, chatModel);
+        }
         ChatOptions chatOptions = llm.getChatOptions(chatCompletion);
         LLMResponse response = chatComplete(chatModel, chatOptions, chatCompletion);
 
@@ -116,6 +138,7 @@ public class LLMHelper {
 
         TokenUsageLog usage =
                 TokenUsageLog.builder()
+                        .taskId(task.getTaskId())
                         .api(chatCompletion.getModel())
                         .integrationName(chatCompletion.getLlmProvider())
                         .completionTokens(response.getCompletionTokens())
@@ -128,6 +151,7 @@ public class LLMHelper {
     }
 
     public LLMResponse generateImage(
+            Task task,
             AIModel llm,
             ImageGenRequest imageGenRequest,
             String payloadStoreLocation,
@@ -144,6 +168,7 @@ public class LLMHelper {
 
         TokenUsageLog usage =
                 TokenUsageLog.builder()
+                        .taskId(task.getTaskId())
                         .api(imageGenRequest.getModel())
                         .integrationName(imageGenRequest.getLlmProvider())
                         .completionTokens(response.getCompletionTokens())
@@ -155,6 +180,7 @@ public class LLMHelper {
     }
 
     public List<Float> generateEmbeddings(
+            Task task,
             AIModel llm,
             EmbeddingGenRequest embeddingGenRequest,
             Consumer<TokenUsageLog> tokenUsageLogger) {
@@ -162,6 +188,7 @@ public class LLMHelper {
     }
 
     public LLMResponse generateAudio(
+            Task task,
             AIModel llm,
             AudioGenRequest request,
             String payloadStoreLocation,
@@ -170,6 +197,7 @@ public class LLMHelper {
         storeMedia(payloadStoreLocation, response.getMedia());
         TokenUsageLog usage =
                 TokenUsageLog.builder()
+                        .taskId(task.getTaskId())
                         .api(request.getModel())
                         .integrationName(request.getLlmProvider())
                         .completionTokens(response.getCompletionTokens())
@@ -181,6 +209,7 @@ public class LLMHelper {
     }
 
     public LLMResponse generateVideo(
+            Task task,
             AIModel llm,
             VideoGenRequest videoGenRequest,
             String payloadStoreLocation,
@@ -190,7 +219,7 @@ public class LLMHelper {
     }
 
     public LLMResponse checkVideoStatus(
-            AIModel llm, VideoGenRequest videoGenRequest, String payloadStoreLocation) {
+            Task task, AIModel llm, VideoGenRequest videoGenRequest, String payloadStoreLocation) {
 
         LLMResponse response = llm.checkVideoStatus(videoGenRequest);
 
@@ -217,6 +246,11 @@ public class LLMHelper {
     @SneakyThrows
     @SuppressWarnings({"raw", "unchecked"})
     private void extractResponse(LLMResponse llmResponse, ChatCompletion input) {
+        if (llmResponse.getResult() == null || llmResponse.getResult().toString().isEmpty()) {
+            // empty response
+            log.debug("empty response: finishReason: {}", llmResponse.getFinishReason());
+            return;
+        }
         Object result = llmResponse.getResult();
         switch (result) {
             case null -> llmResponse.setResult(Map.of());
@@ -231,22 +265,12 @@ public class LLMHelper {
                     String responseText = o.toString();
                     var responseObj = tryToConvertToJSON(responseText, input);
                     hasJsonOutput = true;
-                    if (input.getOutputSchema() != null) {
-                        String error = null;
-                        if (!(responseObj instanceof Map)) {
-                            error = "not a JSON response: %s".formatted(responseObj);
-                        } else {
-                            error =
-                                    validateJsonSchema(
-                                            input.getInputSchema(),
-                                            (Map<String, Object>) responseObj);
-                        }
-                        if (error != null) {
-                            errors.add(
-                                    String.format(
-                                            "Output does not confirm to the schema.  errors: %s",
-                                            error));
-                        }
+                    // tryToConvertToJSON already validated JSON content; this catches non-JSON.
+                    if (input.getOutputSchema() != null && !(responseObj instanceof Map)) {
+                        errors.add(
+                                "Output does not confirm to the schema.  errors: %s"
+                                        .formatted(
+                                                "not a JSON response: %s".formatted(responseObj)));
                     }
                     output.add(responseObj);
                 }
@@ -271,7 +295,7 @@ public class LLMHelper {
             }
             Map<String, Object> map = objectMapper.readValue(responseText, MAP_OF_STRING_TO_OBJ);
             if (chatCompletion.getOutputSchema() != null) {
-                String error = validateJsonSchema(chatCompletion.getInputSchema(), map);
+                String error = validateJsonSchema(chatCompletion.getOutputSchema(), map);
                 if (error != null) {
                     throw new RuntimeException(
                             String.format(
@@ -283,6 +307,11 @@ public class LLMHelper {
 
         } catch (JsonProcessingException e) {
             if (chatCompletion.isJsonOutput()) {
+                log.error(
+                        "error converting to json, response: {}, error: {}",
+                        responseText,
+                        e.getMessage(),
+                        e);
                 Map<String, Object> outputErrors =
                         Map.of("error", e.getMessage(), "response", responseText);
                 throw new RuntimeException(objectMapper.writeValueAsString(outputErrors));
@@ -291,33 +320,13 @@ public class LLMHelper {
         }
     }
 
+    /** Validates data against schema; returns the error message or null on success. */
     private String validateJsonSchema(final SchemaDef schema, Map<String, Object> data) {
         try {
-            // Order in which we use the schema
-            // 1. If there is data -- inline schema def, we use that
-            // 2. Else use name + version to lookup
-            // 3. externalRef if present, in future we will use it -- currently not supported
-            String schemaContent = objectMapper.writeValueAsString(schema.getData());
-            if (schemaContent == null) {
-                return null;
-            }
-
-            Set<ValidationMessage> validationMessages =
-                    jsonSchemaValidator.validate(schemaContent, data);
-
-            if (validationMessages != null && !validationMessages.isEmpty()) {
-                return String.format(
-                        "Schema validation failed %s",
-                        validationMessages.stream()
-                                .map(ValidationMessage::getMessage)
-                                .collect(Collectors.joining(", ")));
-            }
+            schemaService.validate(schema, data);
             return null;
-        } catch (JsonSchemaException jpe) {
-            throw new RuntimeException(
-                    "Bad/Unsupported schema? : " + jpe.getValidationMessages().toString());
-        } catch (JsonProcessingException jpe) {
-            throw new RuntimeException("Error parsing the json schema : " + jpe.getMessage(), jpe);
+        } catch (SchemaValidationException e) {
+            return e.getMessage();
         }
     }
 
@@ -330,12 +339,15 @@ public class LLMHelper {
                     .addFirst(new ChatMessage(ChatMessage.Role.system, input.getInstructions()));
         }
 
-        List<Message> messages = input.getMessages().stream().map(this::constructMessage).toList();
+        List<Message> messages =
+                new ArrayList<>(input.getMessages().stream().map(this::constructMessage).toList());
+
+        ensureLastMessageIsFromUser(messages);
 
         Prompt prompt = new Prompt(messages, chatOptions);
         ChatResponse chatResponse = chatClient.prompt(prompt).call().chatResponse();
         if (chatResponse == null) {
-            throw new RuntimeException("No response generated ");
+            throw new RuntimeException("No response generated");
         }
         if (chatResponse.getResults().isEmpty()) {
             String result = objectMapper.writeValueAsString(chatResponse);
@@ -350,7 +362,7 @@ public class LLMHelper {
         List<ToolCall> tools = null;
         String finishReason = null;
         List<String> responses = new ArrayList<>();
-        List<org.conductoross.conductor.ai.models.Media> media = new ArrayList<>();
+        List<org.conductoross.conductor.ai.model.Media> media = new ArrayList<>();
         for (Generation result : chatResponse.getResults()) {
             if (result.getOutput().hasToolCalls()) {
                 List<AssistantMessage.ToolCall> toolCalls = result.getOutput().getToolCalls();
@@ -358,8 +370,11 @@ public class LLMHelper {
                 for (AssistantMessage.ToolCall toolCall : toolCalls) {
                     String name = toolCall.name();
                     String id = toolCall.id();
+                    if (id == null || id.isBlank()) {
+                        id = UUID.randomUUID().toString();
+                    }
                     String argsAsString = toolCall.arguments();
-                    Map<String, Object> args = Map.of();
+                    Map<String, Object> args = new HashMap<>();
                     try {
                         @SuppressWarnings("unchecked")
                         Map<String, Object> parsedArgs =
@@ -376,12 +391,6 @@ public class LLMHelper {
                                     .filter(toolSpec -> toolSpec.getName().equals(name))
                                     .findFirst();
 
-                    String integrationName =
-                            (String)
-                                    matched.map(ToolSpec::getConfigParams)
-                                            .orElse(Collections.emptyMap())
-                                            .get("integrationName");
-                    args.put("integrationName", integrationName);
                     String type = matched.map(ToolSpec::getType).orElse(TASK_TYPE_SIMPLE);
                     tools.add(
                             ToolCall.builder()
@@ -395,15 +404,17 @@ public class LLMHelper {
                 finishReason = result.getMetadata().getFinishReason();
             } else {
                 responses.add(result.getOutput().getText());
-                result.getOutput()
-                        .getMedia()
-                        .forEach(
-                                m ->
-                                        media.add(
-                                                org.conductoross.conductor.ai.models.Media.builder()
-                                                        .data(m.getDataAsByteArray())
-                                                        .mimeType(m.getMimeType().toString())
-                                                        .build()));
+                List<org.springframework.ai.content.Media> outputMedia =
+                        result.getOutput().getMedia();
+                if (outputMedia != null) {
+                    outputMedia.forEach(
+                            m ->
+                                    media.add(
+                                            org.conductoross.conductor.ai.model.Media.builder()
+                                                    .data(m.getDataAsByteArray())
+                                                    .mimeType(m.getMimeType().toString())
+                                                    .build()));
+                }
                 // storeMedia(outputLocation, result.getOutput().getMedia());
                 if (finishReason == null) {
                     finishReason = result.getMetadata().getFinishReason();
@@ -415,11 +426,40 @@ public class LLMHelper {
             result = responses.getFirst();
         }
         finishReason = finishReasonMap.getOrDefault(finishReason, finishReason).toUpperCase();
+
+        // Extract response_id if present (set by OpenAI Responses API for chaining)
+        String responseId = null;
+        Object respIdObj = chatResponse.getMetadata().get("response_id");
+        if (respIdObj instanceof String rid) {
+            responseId = rid;
+        }
+
+        // Reasoning summary + reasoning token count. Surfaced by the OpenAI
+        // Responses API, Anthropic extended thinking, and Gemini thought
+        // summaries — the chat-model adapters normalize all three onto these
+        // two metadata keys before we read them here.
+        String reasoning = null;
+        Object reasoningObj = chatResponse.getMetadata().get("reasoning");
+        if (reasoningObj instanceof String r && !r.isBlank()) {
+            reasoning = r;
+        }
+        Integer reasoningTokens = null;
+        Object rtObj = chatResponse.getMetadata().get("reasoning_tokens");
+        // ``Number`` rather than ``Integer`` so a Long survives the Jackson
+        // round-trip ChatResponseMetadata may go through. Token counts won't
+        // overflow int — convert and move on.
+        if (rtObj instanceof Number rt) {
+            reasoningTokens = rt.intValue();
+        }
+
         return LLMResponse.builder()
                 .result(result)
                 .media(media)
                 .toolCalls(tools)
                 .finishReason(finishReason)
+                .responseId(responseId)
+                .reasoning(reasoning)
+                .reasoningTokens(reasoningTokens)
                 .completionTokens(chatResponse.getMetadata().getUsage().getCompletionTokens())
                 .promptTokens(chatResponse.getMetadata().getUsage().getPromptTokens())
                 .tokenUsed(chatResponse.getMetadata().getUsage().getTotalTokens())
@@ -432,7 +472,7 @@ public class LLMHelper {
         ImagePrompt prompt = new ImagePrompt(List.of(imageMessage), options);
         ImageResponse response = imageModel.call(prompt);
         LLMResponse mediaGenResponse = new LLMResponse();
-        List<org.conductoross.conductor.ai.models.Media> mediaList = new ArrayList<>();
+        List<org.conductoross.conductor.ai.model.Media> mediaList = new ArrayList<>();
         for (ImageGeneration result : response.getResults()) {
             var image = result.getOutput();
             String url = image.getUrl();
@@ -448,7 +488,7 @@ public class LLMHelper {
             if (base64 != null) {
                 // Base64 data provided - decode and store
                 mediaList.add(
-                        org.conductoross.conductor.ai.models.Media.builder()
+                        org.conductoross.conductor.ai.model.Media.builder()
                                 .data(Base64.getDecoder().decode(base64))
                                 .mimeType(mimeType)
                                 .build());
@@ -460,7 +500,7 @@ public class LLMHelper {
                     // Detect mime type from URL extension if possible
                     String detectedMimeType = getMimeTypeFromUrl(url, mimeType);
                     mediaList.add(
-                            org.conductoross.conductor.ai.models.Media.builder()
+                            org.conductoross.conductor.ai.model.Media.builder()
                                     .data(imageBytes)
                                     .mimeType(detectedMimeType)
                                     .build());
@@ -469,7 +509,7 @@ public class LLMHelper {
                     // nothing)
                     log.warn("Failed to download image from URL, keeping external URL: {}", url);
                     mediaList.add(
-                            org.conductoross.conductor.ai.models.Media.builder()
+                            org.conductoross.conductor.ai.model.Media.builder()
                                     .location(url)
                                     .mimeType(mimeType)
                                     .build());
@@ -491,15 +531,9 @@ public class LLMHelper {
      */
     private byte[] downloadImageFromUrl(String url) {
         try {
-            OkHttpClient client =
-                    new OkHttpClient.Builder()
-                            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                            .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-                            .build();
-
             Request request = new Request.Builder().url(url).get().build();
 
-            try (Response response = client.newCall(request).execute()) {
+            try (Response response = httpClient.newCall(request).execute()) {
                 if (!response.isSuccessful()) {
                     log.error(
                             "Failed to download image from URL {}: HTTP {}", url, response.code());
@@ -520,8 +554,16 @@ public class LLMHelper {
         }
     }
 
-    @SneakyThrows
     private Message constructMessage(ChatMessage chatMessage) {
+        Message message = constructMessageContent(chatMessage);
+        if (chatMessage.isLoopHistory()) {
+            message.getMetadata().put(ChatMessage.LOOP_HISTORY, true);
+        }
+        return message;
+    }
+
+    @SneakyThrows
+    private Message constructMessageContent(ChatMessage chatMessage) {
         return switch (chatMessage.getRole()) {
             case user -> getMessage(chatMessage);
             case assistant -> new AssistantMessage(chatMessage.getMessage());
@@ -546,14 +588,23 @@ public class LLMHelper {
                             .build();
             case tool -> {
                 List<ToolCall> toolCalls = chatMessage.getToolCalls();
+                if (toolCalls == null) {
+                    log.warn("chat message role: {}, but toolCalls is null", chatMessage.getRole());
+                    toolCalls = new ArrayList<>();
+                }
                 try {
                     List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
+                    if (toolCalls.isEmpty()) {
+                        log.info("toolCalls is empty for {}", chatMessage);
+                    }
                     for (ToolCall toolCall : toolCalls) {
                         Map<String, Object> inputJson = toolCall.getInputParameters();
                         var name = extractMethodFromInputParameters(inputJson);
                         String outputJSON = objectMapper.writeValueAsString(toolCall.getOutput());
 
                         log.trace("outputJSON for {} is {}", toolCall.getName(), outputJSON);
+                        log.info("tool: {}", toolCall);
+                        log.info("tool.getTaskReferenceName: {}", toolCall.getTaskReferenceName());
                         responses.add(
                                 new ToolResponseMessage.ToolResponse(
                                         toolCall.getTaskReferenceName(),
@@ -611,11 +662,13 @@ public class LLMHelper {
     }
 
     private Message getMessage(ChatMessage msg) {
+        List<String> rawMedia = msg.getMedia();
         List<Media> media =
-                msg.getMedia().stream()
-                        .map(m -> getMedia(msg.getMimeType(), m))
-                        .filter(Objects::nonNull)
-                        .toList();
+                (rawMedia == null ? List.<String>of() : rawMedia)
+                        .stream()
+                                .map(m -> getMedia(msg.getMimeType(), m))
+                                .filter(Objects::nonNull)
+                                .toList();
         return UserMessage.builder().text(msg.getMessage()).media(media).build();
     }
 
@@ -630,43 +683,50 @@ public class LLMHelper {
                         .filter(documentLoader -> documentLoader.supports(content))
                         .findFirst()
                         .map(loader -> loader.download(content));
+        final String mimeTypeResolved =
+                Optional.ofNullable(mimeType)
+                        .orElse(MimeExtensionResolver.getMimeTypeFromUrl(content, ""));
         return data.map(
                         bytes ->
                                 Media.builder()
                                         .data(bytes)
-                                        .mimeType(MimeType.valueOf(mimeType))
+                                        .mimeType(MimeType.valueOf(mimeTypeResolved))
                                         .build())
                 .orElse(null);
     }
 
     private void storeMedia(
-            String location, List<org.conductoross.conductor.ai.models.Media> media) {
-        Optional<DocumentLoader> docLoader =
+            String location, List<org.conductoross.conductor.ai.model.Media> media) {
+
+        if (media == null || media.isEmpty()) {
+            return;
+        }
+
+        DocumentLoader documentLoader =
                 documentLoaders.stream()
-                        .filter(documentLoader -> documentLoader.supports(location))
-                        .findFirst();
-        docLoader.ifPresent(
-                loader -> {
-                    media.stream()
-                            .filter(m1 -> m1.getData() != null)
-                            .forEach(
-                                    m -> {
-                                        // Each media item gets a unique path with file extension
-                                        // to prevent overwriting when multiple items exist
-                                        // (e.g., video + thumbnail)
-                                        String ext = getExtension(m.getMimeType());
-                                        String uniqueLocation =
-                                                location + "_" + java.util.UUID.randomUUID() + ext;
-                                        String uploadLocation =
-                                                loader.upload(
-                                                        Map.of(),
-                                                        m.getMimeType(),
-                                                        m.getData(),
-                                                        uniqueLocation);
-                                        m.setLocation(uploadLocation);
-                                        m.setData(null);
-                                    });
-                });
+                        .filter(loader -> loader.supports(location))
+                        .findFirst()
+                        .orElse(null);
+        if (documentLoader == null) {
+            log.debug("no document loaders found, media will not be stored");
+            return;
+        }
+        media.stream()
+                .filter(m1 -> m1.getData() != null)
+                .forEach(
+                        m -> {
+                            // Each media item gets a unique path with file extension
+                            // to prevent overwriting when multiple items exist
+                            // (e.g., video + thumbnail)
+                            String ext = getExtension(m.getMimeType());
+                            String uniqueLocation =
+                                    location + "_" + java.util.UUID.randomUUID() + ext;
+                            String uploadLocation =
+                                    documentLoader.upload(
+                                            Map.of(), m.getMimeType(), m.getData(), uniqueLocation);
+                            m.setLocation(uploadLocation);
+                            m.setData(null);
+                        });
     }
 
     /**
@@ -794,6 +854,48 @@ public class LLMHelper {
         }
 
         return result;
+    }
+
+    /**
+     * Ensures the conversation ends with a user message. Some providers (e.g. Anthropic/Claude)
+     * reject requests where the last message has an assistant or tool_call role ("assistant message
+     * prefill"). This typically happens when the prior iteration ended with finishReason=MAX_TOKENS
+     * and the DO_WHILE loop continues with the partial assistant response as the last message in
+     * the history. Appending a user continuation prompt is safe for all providers — OpenAI and
+     * others simply treat it as the next user turn.
+     *
+     * @param messages The mutable list of messages to check and potentially modify
+     */
+    public static void ensureLastMessageIsFromUser(List<Message> messages) {
+        if (messages.isEmpty()) return;
+        Message last = messages.getLast();
+        if (last instanceof UserMessage) return;
+
+        if (last instanceof AssistantMessage assistantMsg) {
+            // Replace trailing assistant message with a user message that includes
+            // the partial text as context + continuation instruction.
+            // This avoids the "assistant message prefill" error from Claude.
+            String partialText = assistantMsg.getText();
+            messages.removeLast();
+            String continuation =
+                    partialText != null && !partialText.isBlank()
+                            ? "You were saying:\n\n"
+                                    + partialText
+                                    + "\n\nPlease continue where you left off."
+                            : "Please continue where you left off.";
+            messages.add(
+                    UserMessage.builder()
+                            .text(continuation)
+                            .metadata(assistantMsg.getMetadata())
+                            .build());
+        } else {
+            // For any other non-user message type (tool_call, system, etc.)
+            messages.add(
+                    UserMessage.builder()
+                            .text("Please continue where you left off.")
+                            .metadata(last.getMetadata())
+                            .build());
+        }
     }
 
     /** Checks if a string looks like JSON */

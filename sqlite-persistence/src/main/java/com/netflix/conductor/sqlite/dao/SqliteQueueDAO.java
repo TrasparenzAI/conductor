@@ -132,7 +132,25 @@ public class SqliteQueueDAO extends SqliteBaseDAO implements QueueDAO {
     }
 
     @Override
+    public List<String> peekFirstIds(String queueName, int count) {
+        final String SQL =
+                "SELECT message_id FROM queue_message "
+                        + "WHERE queue_name = ? AND popped = false "
+                        + "ORDER BY deliver_on, priority DESC, created_on LIMIT ?";
+        return queryWithTransaction(
+                SQL,
+                q -> q.addParameter(queueName).addParameter(count).executeScalarList(String.class));
+    }
+
+    @Override
     public List<Message> pollMessages(String queueName, int count, int timeout) {
+        // A zero- (or negative-) count poll can never pop a message, so return immediately.
+        // Otherwise the long-poll loop below would block for the full timeout waiting on a message
+        // it would never accept. This preserves the immediate empty return that callers relied on
+        // before issue #142 moved the loop guard onto what was actually popped.
+        if (count <= 0) {
+            return new ArrayList<>();
+        }
         if (timeout < 1) {
             List<Message> messages =
                     getWithTransactionWithOutErrorPropagation(
@@ -144,25 +162,24 @@ public class SqliteQueueDAO extends SqliteBaseDAO implements QueueDAO {
         }
 
         long start = System.currentTimeMillis();
-        final List<Message> messages = new ArrayList<>();
 
         while (true) {
             List<Message> messagesSlice =
                     getWithTransactionWithOutErrorPropagation(
-                            tx -> popMessages(tx, queueName, count - messages.size(), timeout));
+                            tx -> popMessages(tx, queueName, count, timeout));
             if (messagesSlice == null) {
                 logger.warn(
-                        "Unable to poll {} messages from {} due to tx conflict, only {} popped",
-                        count,
-                        queueName,
-                        messages.size());
-                // conflict could have happened, returned messages popped so far
-                return messages;
+                        "Unable to poll {} messages from {} due to tx conflict", count, queueName);
+                return new ArrayList<>();
             }
 
-            messages.addAll(messagesSlice);
-            if (messages.size() >= count || ((System.currentTimeMillis() - start) > timeout)) {
-                return messages;
+            // Long-poll semantics: return as soon as at least one message is available (up to
+            // count), rather than blocking for the full timeout waiting to fill the whole batch.
+            // The retry is still needed to keep waiting while the queue is empty; there is no
+            // partial batch to accumulate because we return on the first non-empty poll. This
+            // matches the Redis queue behavior and keeps tail latency low under low activity.
+            if (!messagesSlice.isEmpty() || ((System.currentTimeMillis() - start) > timeout)) {
+                return messagesSlice;
             }
             Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
         }
@@ -199,6 +216,28 @@ public class SqliteQueueDAO extends SqliteBaseDAO implements QueueDAO {
                                         .addParameter(updatedOffsetTimeInSecond)
                                         .addParameter(queueName)
                                         .addParameter(messageId)
+                                        .executeUpdate())
+                == 1;
+    }
+
+    @Override
+    public boolean setUnackTimeoutIfShorter(String queueName, String messageId, long unackTimeout) {
+        long updatedOffsetTimeInSecond = unackTimeout / 1000;
+
+        // Only update when the proposed deliver_on is earlier than what is already set,
+        // mirroring the ZADD LT semantics used by the Redis implementation.
+        final String UPDATE_UNACK_TIMEOUT_IF_SHORTER =
+                "UPDATE queue_message SET offset_time_seconds = ?, deliver_on = strftime('%Y-%m-%d %H:%M:%f', 'now', '+' || ? || ' seconds')"
+                        + " WHERE queue_name = ? AND message_id = ? AND deliver_on > strftime('%Y-%m-%d %H:%M:%f', 'now', '+' || ? || ' seconds')";
+
+        return queryWithTransaction(
+                        UPDATE_UNACK_TIMEOUT_IF_SHORTER,
+                        q ->
+                                q.addParameter(updatedOffsetTimeInSecond)
+                                        .addParameter(updatedOffsetTimeInSecond)
+                                        .addParameter(queueName)
+                                        .addParameter(messageId)
+                                        .addParameter(updatedOffsetTimeInSecond)
                                         .executeUpdate())
                 == 1;
     }

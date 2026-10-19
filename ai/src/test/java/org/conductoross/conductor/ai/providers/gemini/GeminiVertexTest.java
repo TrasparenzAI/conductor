@@ -13,15 +13,21 @@
 package org.conductoross.conductor.ai.providers.gemini;
 
 import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
 
-import org.conductoross.conductor.ai.models.ChatCompletion;
-import org.conductoross.conductor.ai.models.EmbeddingGenRequest;
+import org.conductoross.conductor.ai.model.ChatCompletion;
+import org.conductoross.conductor.ai.model.EmbeddingGenRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.content.Media;
+import org.springframework.util.MimeTypeUtils;
+
+import okhttp3.OkHttpClient;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -29,6 +35,7 @@ class GeminiVertexTest {
 
     private static final String ENV_PROJECT_ID = "GOOGLE_CLOUD_PROJECT";
     private static final String ENV_LOCATION = "GOOGLE_CLOUD_LOCATION";
+    private static final String ENV_API_KEY = "GEMINI_API_KEY";
 
     @Nested
     class UnitTests {
@@ -40,7 +47,7 @@ class GeminiVertexTest {
             GeminiVertexConfiguration config = new GeminiVertexConfiguration();
             config.setProjectId("test-project");
             config.setLocation("us-central1");
-            geminiVertex = new GeminiVertex(config);
+            geminiVertex = new GeminiVertex(config, new OkHttpClient());
         }
 
         @Test
@@ -60,6 +67,13 @@ class GeminiVertexTest {
             var options = geminiVertex.getChatOptions(input);
 
             assertNotNull(options);
+            assertInstanceOf(GeminiChatOptions.class, options);
+            GeminiChatOptions opts = (GeminiChatOptions) options;
+            assertEquals("gemini-1.5-flash", opts.getModel());
+            assertEquals(1000, opts.getMaxTokens());
+            assertEquals(0.7, opts.getTemperature());
+            assertEquals(0.9, opts.getTopP());
+            assertEquals(40, opts.getTopK());
         }
 
         @Test
@@ -72,12 +86,74 @@ class GeminiVertexTest {
             var options = geminiVertex.getChatOptions(input);
 
             assertNotNull(options);
+            assertInstanceOf(GeminiChatOptions.class, options);
+            GeminiChatOptions opts = (GeminiChatOptions) options;
+            assertTrue(opts.isGoogleSearchRetrieval());
+        }
+
+        @Test
+        void testGetChatOptions_withWebSearchFlag() {
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("gemini-2.5-flash");
+            input.setMaxTokens(500);
+            input.setWebSearch(true);
+
+            var options = geminiVertex.getChatOptions(input);
+
+            assertNotNull(options);
+            assertInstanceOf(GeminiChatOptions.class, options);
+            GeminiChatOptions opts = (GeminiChatOptions) options;
+            assertTrue(opts.isGoogleSearchRetrieval());
+        }
+
+        @Test
+        void testGetChatOptions_withWebSearchFlag_apiKeyPath() {
+            GeminiVertexConfiguration apiKeyConfig = new GeminiVertexConfiguration();
+            apiKeyConfig.setApiKey("test-api-key");
+            GeminiVertex apiKeyGemini = new GeminiVertex(apiKeyConfig, new OkHttpClient());
+
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("gemini-2.5-flash");
+            input.setMaxTokens(500);
+            input.setWebSearch(true);
+
+            var options = apiKeyGemini.getChatOptions(input);
+
+            assertNotNull(options);
+            assertInstanceOf(GeminiChatOptions.class, options);
+            GeminiChatOptions opts = (GeminiChatOptions) options;
+            assertTrue(opts.isGoogleSearchRetrieval());
+        }
+
+        @Test
+        void testGetChatOptions_withCodeExecution() {
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("gemini-2.5-flash");
+            input.setMaxTokens(500);
+            input.setCodeInterpreter(true);
+
+            var options = geminiVertex.getChatOptions(input);
+
+            assertInstanceOf(GeminiChatOptions.class, options);
+            GeminiChatOptions opts = (GeminiChatOptions) options;
+            assertTrue(opts.isCodeExecution());
         }
 
         @Test
         void testGetChatModel_createsModel() {
-            var chatModel = geminiVertex.getChatModel();
-            assertNotNull(chatModel);
+            // getChatModel() creates a real GenAI Client which requires either an API key
+            // or GCP Application Default Credentials. Skip gracefully when neither is available.
+            try {
+                var chatModel = geminiVertex.getChatModel();
+                assertNotNull(chatModel);
+                assertInstanceOf(GeminiChatModel.class, chatModel);
+            } catch (Exception e) {
+                if (e.getMessage() != null && e.getMessage().contains("credentials")) {
+                    org.junit.jupiter.api.Assumptions.assumeTrue(
+                            false, "Skipping: no GCP credentials available");
+                }
+                throw e;
+            }
         }
     }
 
@@ -95,13 +171,13 @@ class GeminiVertexTest {
                     System.getenv(ENV_LOCATION) != null
                             ? System.getenv(ENV_LOCATION)
                             : "us-central1");
-            geminiVertex = new GeminiVertex(config);
+            geminiVertex = new GeminiVertex(config, new OkHttpClient());
         }
 
         @Test
         void testChatCompletion() {
             ChatCompletion input = new ChatCompletion();
-            input.setModel("gemini-1.5-flash");
+            input.setModel("gemini-2.5-flash");
             input.setMaxTokens(100);
             input.setTemperature(0.7);
 
@@ -127,6 +203,83 @@ class GeminiVertexTest {
 
             assertNotNull(embeddings);
             assertFalse(embeddings.isEmpty());
+        }
+    }
+
+    /**
+     * Live tests in API-key (AI Studio / generativelanguage.googleapis.com) mode — the mode the
+     * server uses when only {@code conductor.ai.gemini.api-key} (GEMINI_API_KEY) is configured, as
+     * opposed to the Vertex mode covered by {@link IntegrationTests}.
+     */
+    @Nested
+    @EnabledIfEnvironmentVariable(named = ENV_API_KEY, matches = ".+")
+    class ApiKeyIntegrationTests {
+
+        private GeminiVertex gemini;
+
+        @BeforeEach
+        void setUp() {
+            GeminiVertexConfiguration config = new GeminiVertexConfiguration();
+            config.setApiKey(System.getenv(ENV_API_KEY));
+            gemini = new GeminiVertex(config, new OkHttpClient());
+        }
+
+        @Test
+        void testChatCompletion() {
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("gemini-2.5-flash");
+            input.setMaxTokens(100);
+            input.setTemperature(0.7);
+
+            Prompt prompt =
+                    new Prompt(
+                            List.of(new UserMessage("Say hello in one word")),
+                            gemini.getChatOptions(input));
+            var response = gemini.getChatModel().call(prompt);
+
+            assertNotNull(response);
+            assertNotNull(response.getResult());
+            assertFalse(response.getResult().getOutput().getText().isEmpty());
+        }
+
+        @Test
+        void testChatCompletionWithImageMedia() throws Exception {
+            // Live regression for the media fix (PR #1241): the vision model must actually
+            // see the image bytes forwarded by the adapter. The image embeds a
+            // machine-unguessable token, so a correct transcription can only come from
+            // the image — pre-fix the media was silently dropped.
+            byte[] png =
+                    Objects.requireNonNull(
+                                    getClass().getResourceAsStream("/media/melon7391.png"),
+                                    "test asset /media/melon7391.png missing")
+                            .readAllBytes();
+
+            ChatCompletion input = new ChatCompletion();
+            input.setModel("gemini-2.5-flash");
+            input.setMaxTokens(100);
+
+            UserMessage userMsg =
+                    UserMessage.builder()
+                            .text(
+                                    "Transcribe the exact text shown in the image. Reply with"
+                                            + " only that text and nothing else.")
+                            .media(
+                                    List.of(
+                                            Media.builder()
+                                                    .data(png)
+                                                    .mimeType(MimeTypeUtils.IMAGE_PNG)
+                                                    .build()))
+                            .build();
+
+            var response =
+                    gemini.getChatModel()
+                            .call(new Prompt(List.of(userMsg), gemini.getChatOptions(input)));
+
+            String text = response.getResult().getOutput().getText();
+            assertNotNull(text);
+            assertTrue(
+                    text.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "").contains("MELON7391"),
+                    "vision model must transcribe the embedded token MELON7391; got: " + text);
         }
     }
 }

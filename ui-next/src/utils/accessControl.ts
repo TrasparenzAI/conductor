@@ -1,0 +1,68 @@
+import { AccessRole } from "types/User";
+
+export interface UserInfo {
+  roles?: AccessRole[];
+  groups?: any[];
+}
+
+const hasAnyRole = (
+  userInfo: UserInfo | undefined | null,
+  allowedRoles: string[],
+) => {
+  if (!userInfo) {
+    return false;
+  }
+
+  const hasAllowedRoles = (roles?: any[]) =>
+    roles?.find((role) => allowedRoles.includes(role.name));
+
+  if (hasAllowedRoles(userInfo.roles)) {
+    return true;
+  }
+
+  if (userInfo.groups?.find((group) => hasAllowedRoles(group.roles))) {
+    return true;
+  }
+
+  return false;
+};
+
+export const accessControl = {
+  hasUserManagement: (userInfo?: UserInfo) => {
+    return hasAnyRole(userInfo, ["ADMIN"]);
+  },
+  hasApplicationManagement: (userInfo?: UserInfo) => {
+    return hasAnyRole(userInfo, ["USER", "ADMIN"]);
+  },
+  hasOnlyReadOnlyAccess: (userInfo?: UserInfo) => {
+    if (
+      hasAnyRole(userInfo, [
+        "ADMIN",
+        "USER",
+        "METADATA_MANAGER",
+        "WORKFLOW_MANAGER",
+        "HUMAN_TASK_MANAGER",
+        "EVENT_HANDLER_MANAGER",
+        "SCHEDULE_MANAGER",
+        "INTEGRATION_MANAGER",
+      ])
+    ) {
+      return false;
+    }
+    return hasAnyRole(userInfo, ["USER_READ_ONLY"]);
+  },
+  hasAnyRole,
+};
+
+export enum Role {
+  ADMIN = "ADMIN",
+  USER = "USER",
+  METADATA_MANAGER = "METADATA_MANAGER",
+  WORKFLOW_MANAGER = "WORKFLOW_MANAGER",
+  HUMAN_TASK_MANAGER = "HUMAN_TASK_MANAGER",
+  EVENT_HANDLER_MANAGER = "EVENT_HANDLER_MANAGER",
+  SCHEDULE_MANAGER = "SCHEDULE_MANAGER",
+  INTEGRATION_MANAGER = "INTEGRATION_MANAGER",
+  QUEUE_MONITOR_VIEWER = "QUEUE_MONITOR_VIEWER",
+  USER_READ_ONLY = "USER_READ_ONLY",
+}

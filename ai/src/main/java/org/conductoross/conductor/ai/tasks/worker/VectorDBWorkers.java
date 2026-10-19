@@ -18,11 +18,11 @@ import java.util.Optional;
 import java.util.UUID;
 
 import org.conductoross.conductor.ai.LLMs;
-import org.conductoross.conductor.ai.models.EmbeddingGenRequest;
-import org.conductoross.conductor.ai.models.IndexDocInput;
-import org.conductoross.conductor.ai.models.IndexedDoc;
-import org.conductoross.conductor.ai.models.StoreEmbeddingsInput;
-import org.conductoross.conductor.ai.models.VectorDBInput;
+import org.conductoross.conductor.ai.model.EmbeddingGenRequest;
+import org.conductoross.conductor.ai.model.IndexDocInput;
+import org.conductoross.conductor.ai.model.IndexedDoc;
+import org.conductoross.conductor.ai.model.StoreEmbeddingsInput;
+import org.conductoross.conductor.ai.model.VectorDBInput;
 import org.conductoross.conductor.ai.vectordb.VectorDBs;
 import org.conductoross.conductor.config.AIIntegrationEnabledCondition;
 import org.conductoross.conductor.core.execution.tasks.AnnotatedSystemTaskWorker;
@@ -125,6 +125,14 @@ public class VectorDBWorkers implements AnnotatedSystemTaskWorker {
             log.error("Error while getting LLM embeddings: {}", e.getMessage(), e);
             throw e;
         }
+    }
+
+    // Legacy
+    @Deprecated
+    @WorkerTask("LLM_GET_EMBEDDINGS")
+    public @OutputParam("result") List<IndexedDoc> searchUsingEmbeddingsDeprecated(
+            VectorDBInput embeddingsInput) {
+        return searchUsingEmbeddings(embeddingsInput);
     }
 
     @WorkerTask(value = "LLM_SEARCH_INDEX")
